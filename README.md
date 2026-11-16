@@ -50,6 +50,7 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 |---|---|
 | `retrack/mlc_client.py` | Logs in to The MLC and runs lookups. `MockClient` fakes it using `fixtures/mlc_mock.json`. |
 | `retrack/checker.py` | The rules that decide red/yellow/green and the fix steps. |
+| `retrack/name_matcher.py` | Second-pass name check: `ClaudeNameMatcher` (Claude API) and `MockNameMatcher` (offline rules). |
 | `retrack/report.py` | Prints the summary and writes the CSV. |
 | `tests/test_checker.py` | One test per verdict, plus name and ISRC cleanup. |
 
@@ -60,13 +61,13 @@ Apply for The MLC's **Public Search API** on their Data Programs page: https://w
 ## Known limits (v1)
 
 - Only checks The MLC. SoundExchange and ASCAP/BMI Songview have no public API, so the report links to them for a manual check.
-- Name matching is basic. "J. Okafor" won't match "Jide Okafor". That's step 2 (Claude API).
+- Name matching is basic by default. "J. Okafor" won't match "Jide Okafor" unless you add `--smart-names`, which asks the Claude API about names that don't match exactly. Only the two writer names are sent. It needs `ANTHROPIC_API_KEY` and `pip install anthropic`. `--mock` uses offline rules instead, so it needs no key.
 - If one ISRC links to several works, only the first is checked.
 
 ## Roadmap
 
 1. ✅ CLI script + mock mode
-2. Smarter writer-name matching with the Claude API
+2. ✅ Smarter writer-name matching with the Claude API (`--smart-names`)
 3. Plain-English HTML/PDF report
 4. Web app (Next.js + Supabase + Vercel)
 5. Multi-artist label dashboard + monthly re-scan alerts

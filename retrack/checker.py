@@ -17,8 +17,11 @@ from difflib import SequenceMatcher
 GREEN, YELLOW, RED = "GREEN", "YELLOW", "RED"
 
 # How similar two names must be to count as "the same person" (0..1).
-# Step 2 of the plan swaps this for smarter matching with the Claude API.
 NAME_MATCH_THRESHOLD = 0.85
+
+# When the basic match fails we ask a name matcher (see name_matcher.py).
+# Its "yes" only counts if it is at least this sure.
+SMART_MATCH_MIN_CONFIDENCE = 0.8
 
 
 @dataclass
@@ -39,6 +42,7 @@ class Result:
     mlc_writers: list = field(default_factory=list)
     problems: list = field(default_factory=list)
     fixes: list = field(default_factory=list)
+    notes: list = field(default_factory=list)  # FYI only, doesn't change the status
 
 
 def load_catalog(path):
@@ -85,6 +89,24 @@ def names_match(a, b):
     return a == b or SequenceMatcher(None, a, b).ratio() >= NAME_MATCH_THRESHOLD
 
 
+def find_writer(writer, mlc_writers, name_matcher=None):
+    """Is `writer` on the MLC record? Returns (found, note).
+
+    Pass 1: the cheap local check (names_match). Free and instant.
+    Pass 2: only if pass 1 found nothing, ask the name matcher about each MLC name.
+    """
+    if any(names_match(writer, m) for m in mlc_writers):
+        return True, ""
+    if name_matcher is None:
+        return False, ""
+    for m in mlc_writers:
+        verdict = name_matcher.same_person(writer, m)
+        if verdict.same_person and verdict.confidence >= SMART_MATCH_MIN_CONFIDENCE:
+            return True, (f'"{writer}" matched to MLC writer "{m}" '
+                          f"({verdict.confidence:.0%} sure): confirm it's the same person.")
+    return False, ""
+
+
 def total_claimed_share(work):
     """Sum of top-level publisher collection shares (MLC reports these as percents)."""
     return round(sum(float(p.get("collectionShare") or 0) for p in work.get("publishers") or []), 2)
@@ -99,7 +121,7 @@ def mlc_writer_names(work):
     return names
 
 
-def check_row(row, client):
+def check_row(row, client, name_matcher=None):
     recordings = client.search_recordings(row.isrc)
     song_codes = sorted({r.get("mlcsongCode") for r in recordings if r.get("mlcsongCode")})
 
@@ -153,7 +175,13 @@ def check_row(row, client):
         result.problems.append(f"Shares add up to {result.claimed_share:g}%, which means there's a dispute or overclaim.")
         result.fixes.append("Check The MLC Portal for a share conflict on this song.")
 
-    missing = [w for w in row.writers if not any(names_match(w, m) for m in result.mlc_writers)]
+    missing = []
+    for w in row.writers:
+        found, note = find_writer(w, result.mlc_writers, name_matcher)
+        if not found:
+            missing.append(w)
+        if note:
+            result.notes.append(note)
     if missing:
         result.problems.append(f"Writers not found on the MLC record: {', '.join(missing)}.")
         result.fixes.append(
@@ -165,5 +193,5 @@ def check_row(row, client):
     return result
 
 
-def check_catalog(rows, client):
-    return [check_row(r, client) for r in rows]
+def check_catalog(rows, client, name_matcher=None):
+    return [check_row(r, client, name_matcher) for r in rows]

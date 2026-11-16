@@ -12,6 +12,7 @@ A junior developer learning as he goes. When you make changes:
 ## Code map
 - `retrack/mlc_client.py`: API client (`MLCClient`) + `MockClient`. Both have `search_recordings(isrc)` and `get_works(song_codes)`.
 - `retrack/checker.py`: verdict rules. All red/yellow/green logic lives here.
+- `retrack/name_matcher.py`: second-pass writer-name check. `ClaudeNameMatcher` (Claude API, opt-in via `--smart-names`) + `MockNameMatcher` (offline, used with `--mock`). Both have `same_person(a, b)`.
 - `retrack/report.py`: output.
 - `fixtures/mlc_mock.json`: fake API responses shaped like the real spec.
 
