@@ -1,0 +1,37 @@
+{
+  "_note": "Fake MLC responses shaped like the real API (public-api.themlc.com/api/doc). Not real data.",
+  "recordings": {
+    "QZABC2400001": [
+      {"id": "r1", "isrc": "QZABC2400001", "title": "Late Night Drive", "artist": "Nova Reyes", "labels": "Sunbeam Records", "mlcsongCode": "LA1234"}
+    ],
+    "QZABC2400002": [
+      {"id": "r2", "isrc": "QZABC2400002", "title": "Paper Crowns", "artist": "Nova Reyes", "labels": "Sunbeam Records", "mlcsongCode": "PB5678"}
+    ],
+    "QZABC2400003": [
+      {"id": "r3", "isrc": "QZABC2400003", "title": "Concrete Garden", "artist": "The Lowlights", "labels": "Sunbeam Records", "mlcsongCode": "CG9012"}
+    ],
+    "QZABC2400005": [
+      {"id": "r5", "isrc": "QZABC2400005", "title": "Blue Hour", "artist": "The Lowlights", "labels": "Sunbeam Records", "mlcsongCode": ""}
+    ]
+  },
+  "works": {
+    "LA1234": {
+      "primaryTitle": "LATE NIGHT DRIVE", "mlcSongCode": "LA1234", "iswc": "T9000000011",
+      "writers": [{"writerId": "w1", "writerFirstName": "Nova", "writerLastName": "Reyes", "writerIPI": "00000000001"}],
+      "publishers": [{"publisherName": "Nova Reyes Music", "collectionShare": 100}]
+    },
+    "PB5678": {
+      "primaryTitle": "PAPER CROWNS", "mlcSongCode": "PB5678", "iswc": "T9000000022",
+      "writers": [
+        {"writerId": "w1", "writerFirstName": "Nova", "writerLastName": "Reyes", "writerIPI": "00000000001"},
+        {"writerId": "w2", "writerFirstName": "Marcus", "writerLastName": "Bell", "writerIPI": "00000000002"}
+      ],
+      "publishers": [{"publisherName": "Nova Reyes Music", "collectionShare": 50}]
+    },
+    "CG9012": {
+      "primaryTitle": "CONCRETE GARDEN", "mlcSongCode": "CG9012", "iswc": "",
+      "writers": [{"writerId": "w3", "writerFirstName": "J.", "writerLastName": "Okafor", "writerIPI": ""}],
+      "publishers": []
+    }
+  }
+}

@@ -1,0 +1,37 @@
+"""Command line entry point.
+
+    python -m retrack catalog.csv --mock
+    python -m retrack catalog.csv --out report.csv
+"""
+
+import argparse
+import sys
+
+from .checker import check_catalog, load_catalog
+from .mlc_client import MLCClient, MLCError, MockClient
+from .report import print_summary, write_csv
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Check a music catalog against The MLC for royalty gaps.")
+    parser.add_argument("catalog", help="CSV with columns: title, artist, isrc, writers (writers split by ';')")
+    parser.add_argument("--out", default="report.csv", help="where to save the CSV report (default: report.csv)")
+    parser.add_argument("--mock", action="store_true", help="use fake MLC data from fixtures/ instead of the real API")
+    args = parser.parse_args(argv)
+
+    try:
+        rows = load_catalog(args.catalog)
+        client = MockClient() if args.mock else MLCClient()
+        results = check_catalog(rows, client)
+    except (MLCError, ValueError, FileNotFoundError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    print_summary(results)
+    write_csv(results, args.out)
+    print(f"\nFull report saved to {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
