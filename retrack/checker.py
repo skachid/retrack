@@ -9,6 +9,7 @@ Verdicts:
 """
 
 import csv
+import io
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -46,27 +47,37 @@ class Result:
 
 
 def load_catalog(path):
-    """Read the catalog CSV. Writers are separated by ';' in one column."""
-    rows = []
+    """Read the catalog CSV from a file on disk."""
     with open(path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        needed = {"title", "artist", "isrc", "writers"}
-        cols = {c.strip().lower() for c in (reader.fieldnames or [])}
-        missing = needed - cols
-        if missing:
-            raise ValueError(f"CSV is missing columns: {', '.join(sorted(missing))}")
-        for raw in reader:
-            r = {k.strip().lower(): (v or "").strip() for k, v in raw.items()}
-            if not r["isrc"]:
-                continue
-            rows.append(
-                CatalogRow(
-                    title=r["title"],
-                    artist=r["artist"],
-                    isrc=normalize_isrc(r["isrc"]),
-                    writers=[w.strip() for w in r["writers"].split(";") if w.strip()],
-                )
+        return parse_catalog(f)
+
+
+def parse_catalog(lines):
+    """Read catalog rows from CSV text. Writers are separated by ';' in one column.
+
+    `lines` can be an open file or a string (e.g. an uploaded file's contents).
+    """
+    if isinstance(lines, str):
+        lines = io.StringIO(lines.lstrip("\ufeff"))  # drop Excel's invisible BOM marker
+    rows = []
+    reader = csv.DictReader(lines)
+    needed = {"title", "artist", "isrc", "writers"}
+    cols = {(c or "").strip().lower() for c in (reader.fieldnames or [])}
+    missing = needed - cols
+    if missing:
+        raise ValueError(f"CSV is missing columns: {', '.join(sorted(missing))}")
+    for raw in reader:
+        r = {(k or "").strip().lower(): (v or "").strip() for k, v in raw.items() if isinstance(v, str) or v is None}
+        if not r["isrc"]:
+            continue
+        rows.append(
+            CatalogRow(
+                title=r["title"],
+                artist=r["artist"],
+                isrc=normalize_isrc(r["isrc"]),
+                writers=[w.strip() for w in r["writers"].split(";") if w.strip()],
             )
+        )
     return rows
 
 

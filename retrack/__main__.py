@@ -3,15 +3,19 @@
     python -m retrack catalog.csv --mock
     python -m retrack catalog.csv --out report.csv
     python -m retrack catalog.csv --smart-names   # needs ANTHROPIC_API_KEY
+    python -m retrack catalog.csv --mock --html report.html
+    python -m retrack catalog.csv --mock --serve  # opens http://localhost:8000
 """
 
 import argparse
 import sys
+from pathlib import Path
 
 from .checker import check_catalog, load_catalog
 from .mlc_client import MLCClient, MLCError, MockClient
 from .name_matcher import ClaudeNameMatcher, MockNameMatcher
-from .report import print_summary, write_csv
+from .preview import serve
+from .report import print_summary, render_html, write_csv
 
 
 def main(argv=None):
@@ -22,6 +26,11 @@ def main(argv=None):
     parser.add_argument("--smart-names", action="store_true",
                         help="when a writer name doesn't match exactly, ask the Claude API if it's "
                              "the same person (sends only writer names; needs ANTHROPIC_API_KEY)")
+    parser.add_argument("--html", metavar="PATH",
+                        help="also save a readable, printable HTML report (e.g. report.html)")
+    parser.add_argument("--serve", action="store_true",
+                        help="show the HTML report at http://localhost:8000 and open your browser "
+                             "(this computer only; Ctrl+C to stop)")
     args = parser.parse_args(argv)
 
     try:
@@ -44,6 +53,14 @@ def main(argv=None):
     print_summary(results)
     write_csv(results, args.out)
     print(f"\nFull report saved to {args.out}")
+
+    if args.html or args.serve:
+        html = render_html(results, catalog_name=Path(args.catalog).name, mock=args.mock)
+        if args.html:
+            Path(args.html).write_text(html, encoding="utf-8")
+            print(f"HTML report saved to {args.html}")
+        if args.serve:
+            return serve(html)
     return 0
 
 

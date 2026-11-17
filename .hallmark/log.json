@@ -1,0 +1,27 @@
+[
+ {
+  "shape": "Workbench",
+  "theme": "specimen",
+  "axes": "light/high-contrast-serif/cool",
+  "hero": "Counter",
+  "nav": "edge-aligned",
+  "footer": "colophon block",
+  "imagery": "none, words and the tool",
+  "photos": [],
+  "entry": "drop box",
+  "fingerprint": "0bc704",
+  "sections": [
+   "hero upload",
+   "results",
+   "steps + column table",
+   "rows: colour meanings",
+   "band: privacy",
+   "colophon"
+  ],
+  "signature": "drop box that becomes the statement ledger",
+  "waived": [],
+  "prompt": "Retrack homepage: upload catalog CSV, steps, results on same page",
+  "date": "2026-11-17",
+  "mode": "build"
+ }
+]
