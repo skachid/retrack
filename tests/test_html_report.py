@@ -70,9 +70,9 @@ def test_green_song_says_nothing_to_fix(html):
 
 
 def test_sample_data_is_labelled_as_sample(html):
-    assert "Sample data." in html
+    assert "Sample data, not real results." in html
     real = render_html([], mock=False)
-    assert "Sample data." not in real
+    assert "Sample data, not real results." not in real
 
 
 def test_empty_catalog_still_renders():

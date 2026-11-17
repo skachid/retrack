@@ -31,7 +31,7 @@ def suggestion_text(r):
         return ""
     writers = ", ".join(c.writers) or "no writers listed"
     return (f'{suggestion_heading(r)} ({c.confidence:.0%} sure): song code {c.song_code}, '
-            f'"{c.title}" by {writers}')
+            f"“{c.title}” by {writers}")
 
 
 def print_summary(results):
@@ -133,12 +133,12 @@ def _suggestion_html(r):
         return ""
     facts = [("MLC song code", f"<code>{escape(c.song_code)}</code>"),
              ("MLC title", escape(c.title)),
-             ("Writers at The MLC", escape(", ".join(c.writers) or "None listed")),
-             ("How sure", f'<span class="num">{c.confidence:.0%}</span>')]
+             ("Writers at The MLC", escape(", ".join(c.writers) or "None listed"))]
     if c.iswc:
         facts.insert(1, ("ISWC", f"<code>{escape(c.iswc)}</code>"))
     facts_html = "".join(f"<div><dt>{k}</dt><dd>{v}</dd></div>" for k, v in facts)
-    why = f'<p class="why">{escape(c.reason)}</p>' if c.reason else ""
+    reason = f": {escape(c.reason)}" if c.reason else ""
+    why = f'<p class="why">How sure: <span class="num">{c.confidence:.0%}</span>{reason}</p>'
     others = ""
     if r.other_matches:
         codes = ", ".join(o.song_code for o in r.other_matches)
@@ -212,7 +212,7 @@ def summary_html(results, mock=False):
     )
     notice = ""
     if mock:
-        notice = ('<p class="notice"><strong>Sample data.</strong> These results come from '
+        notice = ('<p class="notice"><strong>Sample data, not real results.</strong> These come from '
                   "Retrack’s built-in test data, not from The MLC. Run without --mock to check "
                   "your real registrations.</p>")
     return f"""<p class="lead">{escape(_lead_sentence(counts, len(results)))}</p>

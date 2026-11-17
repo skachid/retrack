@@ -122,16 +122,32 @@ Red songs need `--ai-search` to be in the pack. Without it, Retrack can't tell "
 
 Retrack never logs into The MLC Portal, never asks for your Portal password, and never uploads anything for you.
 
-## The homepage (upload a CSV, see results)
-
-The easiest way in: a web page where you drop your catalog CSV and the results appear right below it.
+## The web UI (the easiest way in)
 
 ```bash
-python -m retrack.web --mock   # try it with fake MLC data, no login needed
+python -m retrack.web --mock   # try it with sample data: nothing leaves your computer
 python -m retrack.web          # the real thing (needs MLC_USERNAME / MLC_PASSWORD)
 ```
 
-Your browser opens **http://localhost:8000**. The page walks you through getting the file ready, has a blank template to download, and shows each song's red/yellow/green verdict with fix steps once you press **Check my catalog**. Press **Ctrl+C** in the terminal to stop it. Like `--serve`, it only answers this computer, keeps no copy of the file, and up to 500 songs are checked at a time. Use `--port 8001` if 8000 is taken.
+Your browser opens **http://localhost:8000**, and you go through five steps:
+
+1. **Upload.** Drop in your spreadsheet as it is: a `.csv` or `.xlsx` with any columns (a distributor export, or your own sheet).
+2. **Columns.** Retrack shows which column it read as the title, artist, ISRC and writers, how sure it is, and your first 5 rows. Fix anything it got wrong. Here you can also turn on the two extra checks. Both are **off by default**, and each says in one sentence what it sends to Claude:
+   - **Smart names**: asks Claude whether two writer names are the same person.
+   - **AI search**: looks for songs that are registered but not linked to your ISRC.
+   Below them, "What will leave this computer" updates as you switch them on and off.
+3. **Check.** "Checking 37 of 120…", updating by itself.
+4. **Report.** The red/yellow/green report, with any notes from reading your file. Download it as HTML or print it.
+5. **Fix pack.** Tick the songs to fix, see "N songs × $X", confirm that you reviewed the data and control the shares, and download the fix pack as a `.zip`. Without the confirmation, no files are made.
+
+Every error says what went wrong and what to do next: the wrong kind of file, no ISRC column, The MLC turning down the login or not answering, or Claude not being set up.
+
+**Your files.** The upload goes in a private folder on this computer, and only for as long as you need it:
+- **Delete my files now** on the results page removes it straight away.
+- Stopping Retrack (**Ctrl+C**) deletes everything.
+- If Retrack crashed last time, it clears the leftovers when it starts.
+
+It only answers this computer, it never talks to any website other than The MLC's API (and Claude, if you turn a check on), and it checks up to 500 songs at a time. With `--mock`, every page says **Sample data, not real results**. Use `--port 8001` if 8000 is taken. Everything works with JavaScript turned off too.
 
 ## Read the report in your browser
 
@@ -184,11 +200,14 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 | `retrack/compliance.py` | The disclaimer, the "never" text and the attestation wording, in one place. |
 | `retrack/report.py` | Prints the summary, writes the CSV and builds the HTML report. |
 | `retrack/report.css` | The HTML report's styles. They're pasted into the HTML file, so it needs nothing else. |
-| `retrack/web.py` | The homepage: upload form, `/check` (runs the check on an uploaded CSV), `/template.csv`. |
-| `retrack/home.css`, `retrack/home.js` | The homepage's styles and its small script (drag and drop, results without a reload). The page still works with JavaScript off. |
+| `retrack/web.py` | The web UI's routes: upload, columns, the check in the background, results, fix pack download, delete. |
+| `retrack/web_pages.py` | The HTML for each step of the web UI. |
+| `retrack/sessions.py` | Where uploads are kept while you work, and how they're deleted. |
+| `retrack/privacy.py` | What leaves your computer for each setting. Every privacy sentence comes from here. |
+| `retrack/home.css`, `retrack/home.js` | The web UI's styles and its small script (drag and drop, live progress, the running total). Every page still works with JavaScript off. |
 | `retrack/preview.py` | `--serve`: a tiny local web server (Python's built-in `http.server`) for the HTML report. |
 | `tests/test_checker.py` | One test per verdict, plus name and ISRC cleanup. |
-| `tests/test_web.py` | The homepage: uploads, errors, results on the same page, refusing other websites. |
+| `tests/test_web.py` | The web UI end to end: upload → columns → check → fix pack download, attestation refusal, every error, file deletion, and privacy text that matches what's actually sent. |
 | `tests/test_work_search.py` | `--ai-search`: the song-code search, the search limits, both searchers, and the two red cases. |
 | `tests/test_importer.py` | `import`: reading messy files, both mappers, the confirmation step, every cleanup rule, and a test proving only the header + 5 rows reach Claude. |
 | `tests/test_fixes.py` | The fix pack and the compliance rules: no files without attestation, ownership never guessed, one price for every verdict. |
@@ -207,7 +226,6 @@ Apply for The MLC's **Public Search API** on their Data Programs page: https://w
 - Only checks The MLC. SoundExchange and ASCAP/BMI Songview have no public API, so the report links to them for a manual check.
 - Name matching is basic by default. "J. Okafor" won't match "Jide Okafor" unless you add `--smart-names`, which asks the Claude API about names that don't match exactly. Only the two writer names are sent. It needs `ANTHROPIC_API_KEY` and `pip install anthropic`. `--mock` uses offline rules instead, so it needs no key.
 - If one ISRC links to several works, only the first is checked.
-- `--ai-search` is on the command line only for now, not the homepage.
 - How The MLC's `/search/songcode` matches titles and writers (exact or fuzzy) isn't documented. The mock assumes exact titles, which is why trying variants helps.
 
 ## Roadmap
@@ -216,5 +234,6 @@ Apply for The MLC's **Public Search API** on their Data Programs page: https://w
 2. ✅ Smarter writer-name matching with the Claude API (`--smart-names`)
 3. ✅ Plain-English HTML report (`--html`, `--serve`); print it to PDF from the browser
 4. ✅ Find registered-but-unlinked songs by title and writers (`--ai-search`)
-5. Web app (Next.js + Supabase + Vercel)
-6. Multi-artist label dashboard + monthly re-scan alerts
+5. ✅ Local web UI, end to end: upload → columns → check → report → fix pack
+6. Hosted web app (Next.js + Supabase + Vercel), with payments
+7. Multi-artist label dashboard + monthly re-scan alerts

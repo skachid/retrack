@@ -29,6 +29,11 @@ class MLCError(Exception):
     """Anything that went wrong talking to The MLC."""
 
 
+class MLCAuthError(MLCError):
+    """The MLC refused our login (or there are no login details). Retrying won't help;
+    the credentials in .env need fixing."""
+
+
 def split_name(full_name):
     """'Jide Okafor' -> ('Jide', 'Okafor'). The last word is the last name.
 
@@ -55,7 +60,7 @@ class MLCClient:
         self.username = username or os.environ.get("MLC_USERNAME")
         self.password = password or os.environ.get("MLC_PASSWORD")
         if not self.username or not self.password:
-            raise MLCError(
+            raise MLCAuthError(
                 "Missing MLC credentials. Set MLC_USERNAME and MLC_PASSWORD "
                 "(see .env.example), or run with --mock."
             )
@@ -71,10 +76,10 @@ class MLCClient:
             timeout=self.timeout,
         )
         if resp.status_code != 200:
-            raise MLCError(f"Login failed ({resp.status_code}): {resp.text[:200]}")
+            raise MLCAuthError(f"Login failed ({resp.status_code}): {resp.text[:200]}")
         data = resp.json()
         if data.get("error"):
-            raise MLCError(f"Login failed: {data.get('errorDescription') or data['error']}")
+            raise MLCAuthError(f"Login failed: {data.get('errorDescription') or data['error']}")
         self._token = data["accessToken"]
 
     def _post(self, path, body):

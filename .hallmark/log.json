@@ -1,5 +1,28 @@
 [
  {
+  "mode": "redesign",
+  "depth": "polish",
+  "scope": "app",
+  "theme": "specimen",
+  "shape": "Workbench",
+  "entry": "web UI flow: upload, columns, check, report, fix pack",
+  "sections": [
+   "upload",
+   "columns",
+   "check",
+   "report",
+   "fix pack",
+   "error"
+  ],
+  "signature": "the drop box that turns into the statement ledger",
+  "waived": [
+   "71",
+   "72"
+  ],
+  "prompt": "polish the local Retrack web UI into an end-to-end flow for label owners",
+  "date": "2026-11-17"
+ },
+ {
   "shape": "Workbench",
   "theme": "specimen",
   "axes": "light/high-contrast-serif/cool",

@@ -136,7 +136,7 @@ def find_writer(writer, mlc_writers, name_matcher=None):
     for m in mlc_writers:
         verdict = name_matcher.same_person(writer, m)
         if verdict.same_person and verdict.confidence >= SMART_MATCH_MIN_CONFIDENCE:
-            return True, (f'"{writer}" matched to MLC writer "{m}" '
+            return True, (f"“{writer}” matched to MLC writer “{m}” "
                           f"({verdict.confidence:.0%} sure): confirm it's the same person.")
     return False, ""
 
@@ -257,7 +257,7 @@ def confident_matches(outcome):
 
 def describe(c):
     writers = ", ".join(c.writers) or "no writers listed"
-    return f'song code {c.song_code}, "{c.title}" by {writers}'
+    return f"song code {c.song_code}, “{c.title}” by {writers}"
 
 
 def apply_red_search(result, client, work_searcher):
@@ -271,7 +271,7 @@ def apply_red_search(result, client, work_searcher):
         result.red_case = NOT_LINKED
         result.suggested_match = best
         result.other_matches = matches[1:]
-        result.problems.insert(0, f'Looks registered at The MLC as "{best.title}" '
+        result.problems.insert(0, f"Looks registered at The MLC as “{best.title}” "
                                   f"(song code {best.song_code}), but not linked to your recording.")
         result.fixes = [
             f"Please confirm it's your song: open song code {best.song_code} in The MLC Portal "

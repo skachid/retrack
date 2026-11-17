@@ -365,13 +365,13 @@ def test_bulk_match_file_has_no_duplicate_isrcs(tmp_path):
 
 
 def test_html_report_and_homepage_have_the_compliance_text(results):
-    from retrack.web import render_home
+    from retrack.web_pages import home_page as render_home
     assert COMPLIANCE_TEXT in render_html(results)
     assert COMPLIANCE_TEXT in render_home()
 
 
 def test_no_logos_or_images_anywhere(results):
-    from retrack.web import render_home
+    from retrack.web_pages import home_page as render_home
     for page in (render_html(results), render_home()):
         lower = page.lower()
         assert "<img" not in lower and "<svg" not in lower and "logo" not in lower

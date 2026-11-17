@@ -1,374 +1,540 @@
-"""The Retrack homepage: upload a catalog CSV, see the results on the same page.
+"""The Retrack web UI, on this computer only.
 
     python -m retrack.web            # checks against the real MLC API (needs MLC_USERNAME/MLC_PASSWORD)
-    python -m retrack.web --mock     # checks against the fake data in fixtures/ (no login needed)
+    python -m retrack.web --mock     # sample data: nothing leaves the computer
 
-Like --serve, this uses only Python's built-in http.server, listens on
-127.0.0.1 (this computer only) and serves nothing but its own pages.
+The flow, one page per step (pages are built in web_pages.py):
+  GET  /                        upload a spreadsheet (.csv or .xlsx, any columns)
+  POST /upload                  saves it in a private session folder, reads it
+  GET  /s/<id>/columns          confirm the column mapping, choose the extra checks
+  POST /s/<id>/scan             converts the rows and starts the check in the background
+  GET  /s/<id>/progress         "Checking 37 of 120…" (refreshes itself)
+  GET  /s/<id>/status           the same, as JSON, for the page's script
+  GET  /s/<id>/results          the report, with songs to tick for the fix pack
+  POST /s/<id>/fix              the ticked songs -> review page with the price
+  POST /s/<id>/fix/download     needs the attestation checkbox -> the fix pack .zip
+  POST /s/<id>/delete           "Delete my files now"
+  GET  /s/<id>/report.html, /s/<id>/import_problems.csv, /template.csv  downloads
 
-Routes:
-  GET  /               the homepage
-  POST /check          a CSV upload; answers with the page plus results
-                       (or just the results, when the page's script asks)
-  GET  /template.csv   an empty catalog with the four column headers
+Every rule is a call to the existing modules: importer (reading, mapping,
+cleanup), checker (verdicts), fixes (what can be fixed, price, attestation,
+the pack itself) and privacy (what leaves the computer). This file only
+wires them to web pages.
+
+Safety: it listens on 127.0.0.1 only, refuses POSTs from other websites
+(Origin check), serves nothing but its own pages, and keeps uploads in
+sessions.SessionStore, which deletes them when the server stops.
 """
 
 import argparse
+import datetime
+import io
+import json
+import re
+import signal
 import sys
+import tempfile
+import threading
 import webbrowser
+import zipfile
 from email.parser import BytesParser
 from email.policy import HTTP
-from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
-from .checker import check_catalog, parse_catalog
-from .compliance import COMPLIANCE_TEXT
-from .mlc_client import MLCClient, MLCError, MockClient
-from .name_matcher import MockNameMatcher
+import requests
+
+from . import web_pages as pages
+from .checker import check_row, load_catalog
+from .fixes import FixPackError, build_fix_pack, check_template, confirm, fix_kind, plan_fixes
+from .importer import (FIELDS, REQUIRED, CatalogImportError, FieldMap, HeaderRuleMapper, clean_mapping,
+                       convert, read_table, sample_rows, write_catalog, write_problems)
+from .mlc_client import MLCAuthError, MLCClient, MLCError, MockClient
+from .name_matcher import ClaudeNameMatcher, MockNameMatcher
 from .preview import HOST, PORT, port_busy_message, run_until_stopped
-from .report import CSS_PATH, GROUPS, MANUAL_CHECKS, date_text, groups_html, summary_html
+from .report import render_html
+from .sessions import SessionStore
+from .work_search import ClaudeWorkSearcher, MockWorkSearcher
 
-HERE = Path(__file__).parent
-MAX_UPLOAD_BYTES = 2_000_000  # about 20,000 songs; anything bigger is probably the wrong file
-MAX_SONGS = 500               # each song is 2 API calls, so keep one check to a few minutes
+MAX_UPLOAD_BYTES = 5_000_000  # a big .xlsx catalog is well under this
+MAX_FORM_BYTES = 200_000      # the non-file forms (columns, ticked songs)
+MAX_SONGS = 500               # each song is at least 2 API calls, so keep one check to minutes
 TEMPLATE_CSV = "title,artist,isrc,writers\r\n"
+SESSION_PATH = re.compile(r"^/s/([A-Za-z0-9_-]{22})/(columns|scan|progress|status|results|fix|fix/download|"
+                          r"delete|report\.html|import_problems\.csv)$")
 
 
 class UploadError(Exception):
-    """Something wrong with the uploaded file. The message is shown to the user."""
+    """Something wrong with what was sent. The message is shown to the user."""
 
 
-# ---- Reading the upload ------------------------------------------------------------
+# ---- Reading what the browser sent ----------------------------------------------------------
 
-def read_upload(content_type, body):
-    """Pull the uploaded file out of a multipart/form-data request.
+def parse_multipart(content_type, body):
+    """A multipart/form-data body -> {field name: [values]}. Files come back as
+    (filename, bytes), other fields as text.
 
-    Browsers send file uploads in "multipart" format: the body is split into
-    parts, one per form field. Python's email parser understands that format
-    (emails with attachments use it too), so we borrow it instead of adding a
-    dependency. Returns (filename, file_bytes).
+    Browsers send file uploads in "multipart" format. Python's email parser
+    understands it (emails with attachments use it too), so we borrow it
+    instead of adding a dependency.
     """
     if not content_type.startswith("multipart/form-data"):
-        raise UploadError("Choose a CSV file, then press Check my catalog.")
+        raise UploadError("Choose a file, then press Upload.")
     message = BytesParser(policy=HTTP).parsebytes(
-        b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + body
-    )
+        b"Content-Type: " + content_type.encode("latin-1") + b"\r\n\r\n" + body)
+    fields = {}
     for part in message.iter_parts():
-        if part.get_param("name", header="content-disposition") == "catalog":
-            data = part.get_payload(decode=True) or b""
-            if not data:
-                break
-            return part.get_filename() or "catalog.csv", data
-    raise UploadError("Choose a CSV file, then press Check my catalog.")
+        name = part.get_param("name", header="content-disposition")
+        data = part.get_payload(decode=True) or b""
+        filename = part.get_filename()
+        value = (filename, data) if filename is not None else data.decode("utf-8", "replace")
+        fields.setdefault(name, []).append(value)
+    return fields
 
 
-def decode_csv(data):
-    """Turn the file's bytes into text. Most CSVs are UTF-8; older Excel uses Windows-1252."""
-    if data[:2] == b"PK":  # .xlsx files are zip archives, which start with "PK"
-        raise UploadError("That looks like an Excel workbook. In Excel choose File, Save As, "
-                          "CSV UTF-8, then upload the .csv file.")
-    for encoding in ("utf-8-sig", "cp1252"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-    raise UploadError("Retrack couldn’t read that file as text. Save it as CSV UTF-8 and try again.")
+def read_upload(content_type, body):
+    """The uploaded catalog: (filename, bytes)."""
+    for value in parse_multipart(content_type, body).get("catalog", []):
+        if isinstance(value, tuple) and value[1]:
+            return value
+    raise UploadError("Choose a .csv or .xlsx file, then press Upload.")
 
 
-def check_upload(filename, data, make_client, name_matcher=None):
-    """Upload bytes in, results out. Raises UploadError or MLCError."""
+def check_file_type(filename):
+    suffix = Path(filename).suffix.lower()
+    if suffix not in (".csv", ".xlsx"):
+        hint = {".xls": "That’s an older Excel file. In Excel choose File, Save As, Excel Workbook (.xlsx).",
+                ".numbers": "In Numbers choose File, Export To, Excel or CSV.",
+                ".pdf": "Retrack needs the spreadsheet itself, not a PDF of it."}.get(suffix, "")
+        raise UploadError(f"Retrack reads .csv and .xlsx files, and this is “{Path(filename).name}”. "
+                          f"{hint} From Google Sheets use File, Download, CSV.".strip())
+
+
+# ---- Watching Claude, so a silent fallback is reported -------------------------------------
+#
+# The Claude matchers are fail-safe: when Claude doesn't answer they say "no
+# match" and the check carries on. These thin wrappers count those times so the
+# results page can say so. They change no answer.
+
+UNAVAILABLE = ("unavailable", "no answer")
+
+
+class WatchedNameMatcher:
+    def __init__(self, inner, session):
+        self.inner, self.session = inner, session
+
+    def same_person(self, a, b):
+        verdict = self.inner.same_person(a, b)
+        if any(word in verdict.reason for word in UNAVAILABLE):
+            self.session.claude_failures += 1
+        return verdict
+
+
+class WatchedWorkSearcher:
+    def __init__(self, inner, session):
+        self.inner, self.session = inner, session
+
+    def suggest_queries(self, title, writers):
+        queries = self.inner.suggest_queries(title, writers)
+        if queries is None:
+            self.session.claude_failures += 1
+        return queries
+
+    def judge(self, title, writers, candidate):
+        verdict = self.inner.judge(title, writers, candidate)
+        if any(word in verdict.reason for word in UNAVAILABLE):
+            self.session.claude_failures += 1
+        return verdict
+
+
+# ---- The check, in the background -----------------------------------------------------------
+
+MLC_LOGIN_FAILED = ("Retrack couldn’t log in to The MLC",
+                    "The MLC turned down Retrack’s login. Check MLC_USERNAME and MLC_PASSWORD in your "
+                    ".env file, then stop Retrack (Ctrl+C) and start it again. Your file is fine.")
+MLC_DOWN = ("The MLC didn’t answer",
+            "Nothing is wrong with your file. The MLC’s service may be busy or down. "
+            "Wait a few minutes, then press Check my songs again.")
+CLAUDE_MISSING = ("Claude isn’t set up on this computer",
+                  "Smart names and AI search use the Claude API, which needs ANTHROPIC_API_KEY and "
+                  "the anthropic package. Turn both checks off to go on without them, or set them up "
+                  "and restart Retrack.")
+
+
+def run_scan(session, make_client, name_matcher, work_searcher):
+    """Check every row, updating session.done as it goes. Runs in its own thread."""
     try:
-        rows = parse_catalog(decode_csv(data))
-    except ValueError as e:  # missing columns, e.g. "CSV is missing columns: writers"
-        missing = str(e).split(": ", 1)[-1]
-        raise UploadError(f"Your file has no {missing} column. The first row needs these four "
-                          "headers: title, artist, isrc, writers.")
-    if len(rows) > MAX_SONGS:
-        raise UploadError(f"That file has {len(rows)} songs. Retrack checks up to {MAX_SONGS} at a time; "
-                          "split the file and check each part.")
-    return check_catalog(rows, make_client(), name_matcher)
+        client = make_client()
+        for row in session.rows:
+            if session.cancelled:  # "Delete my files now" was pressed
+                return
+            session.results.append(check_row(row, client, name_matcher, work_searcher))
+            session.done += 1
+        session.state = "done"
+    except MLCAuthError:
+        session.fail(*MLC_LOGIN_FAILED)
+    except (MLCError, requests.RequestException):
+        session.fail(*MLC_DOWN)
+    except Exception as e:  # a bug: say so plainly instead of hanging on "Checking…"
+        session.fail("Something went wrong inside Retrack",
+                     f"Your file is fine. Press Check my songs to try again; if it happens again, "
+                     f"restart Retrack. ({type(e).__name__})")
 
 
-# ---- Building the page --------------------------------------------------------------
+# ---- The server ------------------------------------------------------------------------------
 
-def results_section(results, filename, mock):
-    return f"""<div class="container">
-    <div class="results-head">
-      <div>
-        <h2>Results for {escape(filename)}</h2>
-        <p class="results-meta">Checked {date_text()}</p>
-      </div>
-      <button type="button" class="btn btn--quiet" data-print hidden>Print or save as PDF</button>
-    </div>
-    {summary_html(results, mock)}
-    {filter_bar(results)}
-    <div class="song-list">{groups_html(results, expanded=False)}</div>
-  </div>"""
+class Config:
+    """Everything the handler needs, passed in (dependency injection), so tests can
+    swap the MLC and Claude for fakes."""
+
+    def __init__(self, make_client, mock, sessions, make_name_matcher, make_work_searcher):
+        self.make_client = make_client
+        self.mock = mock
+        self.sessions = sessions
+        self.make_name_matcher = make_name_matcher
+        self.make_work_searcher = make_work_searcher
 
 
-def filter_bar(results):
-    """Buttons that show one colour at a time. Hidden until the page's script turns them on,
-    because without JavaScript they couldn't do anything."""
-    if not results:
-        return ""
-    counts = {cls: sum(1 for r in results if GROUPS[r.status][0] == cls) for cls, *_ in GROUPS.values()}
-    buttons = [f'<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="num">{len(results)}</span></button>']
-    for cls, heading, _, _ in GROUPS.values():
-        if counts[cls]:
-            buttons.append(f'<button type="button" class="chip is-{cls}" data-filter="{cls}" aria-pressed="false">'
-                           f'{heading} <span class="num">{counts[cls]}</span></button>')
-    return f"""<div class="filters" role="group" aria-label="Show songs" hidden>
-      {"".join(buttons)}
-      <button type="button" class="chip chip--quiet" data-expand>Open all</button>
-    </div>"""
+def make_handler(config):
+    mock = config.mock
 
-
-def error_section(title, message):
-    return f"""<div class="container">
-    <div class="alert" role="alert">
-      <h2>{escape(title)}</h2>
-      <p>{escape(message)}</p>
-    </div>
-  </div>"""
-
-
-def _stylesheet():
-    """report.css (tokens and song cards) plus home.css, with home.css's Hallmark stamp on top."""
-    report = CSS_PATH.read_text(encoding="utf-8")
-    home = (HERE / "home.css").read_text(encoding="utf-8")
-    stamp, home_rules = home.split("/* Homepage.", 1)
-    report_rules = report[report.index("/* Tokens."):]  # skip the report's own stamp
-    return stamp + report_rules + "\n/* Homepage." + home_rules
-
-
-def render_home(results_inner="", mock=False):
-    meanings = "".join(
-        f'<div class="is-{cls}"><dt>{verdict}: {meaning.lower()}</dt><dd>{explain}</dd></div>'
-        for (cls, _, verdict, meaning), explain in zip(
-            (GROUPS[s] for s in GROUPS),
-            ("The MLC has no match for the recording, or it isn’t linked to a song. "
-             "Royalties for it are probably going unpaid.",
-             "Shares don’t add up to 100%, nobody is collecting, or one of your writers is missing.",
-             "The recording is linked to a song, 100% is claimed and your writers match."),
-        )
-    )
-    manual = " and ".join(f'<a href="{escape(url)}">{escape(name)}</a>' for name, url in MANUAL_CHECKS)
-    mode = ('<p class="mode"><strong>Demo mode.</strong> Files are checked against Retrack’s '
-            "test data, not The MLC.</p>") if mock else ""
-    script = (HERE / "home.js").read_text(encoding="utf-8")
-
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Upload your catalog and Retrack checks every song’s registration with The MLC, then shows what to fix.">
-<title>Retrack, find unpaid song royalties</title>
-<style>
-{_stylesheet()}
-</style>
-</head>
-<body class="home">
-<header class="bar">
-  <div class="container">
-    <a class="wordmark" href="/" aria-label="Retrack home">Retrack</a>
-    <nav aria-label="Page"><a href="#how">How it works</a></nav>
-  </div>
-</header>
-
-<main>
-  <section class="hero" aria-labelledby="hero-title">
-    <div class="container">
-      <div>
-        <h1 id="hero-title">Find the royalties your songs are missing.</h1>
-        <p class="lead">Upload your catalog and Retrack checks each song’s registration with The MLC.</p>
-      </div>
-      <form id="upload" class="upload" aria-label="Upload your catalog" action="/check" method="post" enctype="multipart/form-data">
-        <label id="drop" class="drop" for="catalog">
-          <span class="drop-title">Drop your catalog CSV here</span>
-          <span class="drop-hint">or click to choose a file</span>
-          <span id="file-name" class="drop-file" aria-live="polite"></span>
-          <input id="catalog" name="catalog" type="file" accept=".csv,text/csv" required aria-describedby="upload-help">
-        </label>
-        <div class="upload-row">
-          <p id="upload-help" class="helper">Columns: title, artist, isrc, writers. <a href="/template.csv">Blank template</a></p>
-          <button id="check" class="btn" type="submit"><span class="spinner" aria-hidden="true"></span><span class="label">Check my catalog</span></button>
-        </div>
-        {mode}
-      </form>
-    </div>
-  </section>
-
-  <section id="results" class="results" aria-live="polite" aria-label="Results">{results_inner}</section>
-
-  <section id="how" class="section" aria-labelledby="how-title">
-    <div class="container">
-      <h2 id="how-title">How it works</h2>
-      <p class="lead">Four steps, about five minutes.</p>
-      <ol class="how-steps">
-        <li><h3>Export your catalog</h3><p>From your distributor’s dashboard, or your own spreadsheet.</p></li>
-        <li><h3>Keep four columns</h3><p>title, artist, isrc and writers, one song per row.</p></li>
-        <li><h3>Save it as CSV</h3><p>Excel: Save As, CSV UTF-8. Google Sheets: Download, CSV.</p></li>
-        <li><h3>Upload and read</h3><p>Drop it in the <a href="#upload">box at the top</a>. Red songs come first.</p></li>
-      </ol>
-
-      <div class="file-spec">
-        <div>
-          <h3>The four columns</h3>
-          <p>Name them exactly like this in the first row. Extra columns are ignored.</p>
-          <a class="btn btn--quiet" href="/template.csv" download>Download blank template</a>
-        </div>
-        <table class="columns">
-          <thead><tr><th scope="col">Column</th><th scope="col">What goes in it</th><th scope="col">Looks like</th></tr></thead>
-          <tbody>
-            <tr><th scope="row"><code>title</code></th><td>The song’s name as released</td><td>Example Song</td></tr>
-            <tr><th scope="row"><code>artist</code></th><td>The releasing artist</td><td>Example Artist</td></tr>
-            <tr><th scope="row"><code>isrc</code></th><td>The recording’s 12-character code from your distributor. Dashes are fine.</td><td><code>CC-XXX-YY-NNNNN</code></td></tr>
-            <tr><th scope="row"><code>writers</code></th><td>Every songwriter, split by a semicolon</td><td>First Writer; Second Writer</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </section>
-
-  <section class="section" aria-labelledby="colours-title">
-    <div class="container">
-      <h2 id="colours-title">What each colour means</h2>
-      <dl class="meaning-rows">{meanings}</dl>
-    </div>
-  </section>
-
-  <section class="band" aria-labelledby="privacy-title">
-    <div class="container">
-      <h2 id="privacy-title">Your file stays yours</h2>
-      <ul>
-        <li><strong>Read once, saved nowhere.</strong><span>Retrack runs on this computer and forgets the file after the check.</span></li>
-        <li><strong>Only codes go to The MLC.</strong><span>It sends ISRCs and song codes, never the whole file.</span></li>
-        <li><strong>No audio, no training.</strong><span>It never touches your recordings and never learns from your catalog.</span></li>
-      </ul>
-    </div>
-  </section>
-</main>
-
-<footer class="foot">
-  <div class="container">
-    <p>Retrack checks The MLC’s Public Search API, which covers US streaming mechanicals.
-    SoundExchange and ASCAP/BMI have no public API, so check those by hand: {manual}.</p>
-    <p class="small compliance">{escape(COMPLIANCE_TEXT)}</p>
-  </div>
-</footer>
-<script>
-{script}
-</script>
-</body>
-</html>
-"""
-
-
-# ---- The server -----------------------------------------------------------------------
-
-def make_handler(make_client, name_matcher=None, mock=False):
-    """Build the request handler. `make_client` returns a fresh MLC client for each check."""
-
-    class HomeHandler(BaseHTTPRequestHandler):
-        def _send(self, status, body, content_type="text/html; charset=utf-8", extra_headers=()):
-            data = body.encode("utf-8")
+    class Handler(BaseHTTPRequestHandler):
+        # -- sending --
+        def _send(self, status, body, content_type="text/html; charset=utf-8", headers=()):
+            data = body.encode("utf-8") if isinstance(body, str) else body
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
-            for name, value in extra_headers:
+            self.send_header("X-Content-Type-Options", "nosniff")
+            for name, value in headers:
                 self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
 
-        def _answer(self, status, inner):
-            # The page's script only wants the results; a plain form post gets the whole page.
-            if self.headers.get("X-Retrack-Fragment") == "1":
-                self._send(status, inner)
-            else:
-                self._send(status, render_home(inner, mock))
+        def _redirect(self, location):
+            self.send_response(303)  # "see other": after a form post, go to this page with GET
+            self.send_header("Location", location)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def _from_another_site(self):
             # Any website you visit could try to post a form to localhost. Browsers
             # say where a request came from in the Origin header, so refuse anything
             # that isn't this page. (This guards against "cross-site request forgery".)
             origin = self.headers.get("Origin")
-            if not origin:
-                return False
+            if not origin or origin == "null":
+                return origin == "null"
             port = self.server.server_port
             return origin not in (f"http://localhost:{port}", f"http://127.0.0.1:{port}")
 
+        def _body(self, limit):
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > limit:
+                self.close_connection = True  # don't read a huge body we won't use
+                raise UploadError(f"That’s too big: Retrack takes files up to {limit // 1_000_000 or 1} MB. "
+                                  "Check that you picked your catalog, not a recording.")
+            return self.rfile.read(length)
+
+        def _form(self):
+            return parse_qs(self._body(MAX_FORM_BYTES).decode("utf-8", "replace"))
+
+        def _gone(self):
+            self._send(404, pages.error_page(
+                "This check has ended",
+                "Retrack deletes files when you press Delete my files now or stop it, so this page "
+                "is no longer here. Upload your spreadsheet again to start a new check.", mock))
+
+        # -- routing --
         def do_GET(self):
-            path = urlsplit(self.path).path
-            if path in ("/", "/index.html"):
-                self._send(200, render_home("", mock))
-            elif path == "/template.csv":
-                self._send(200, TEMPLATE_CSV, "text/csv; charset=utf-8",
-                           [("Content-Disposition", 'attachment; filename="retrack-template.csv"')])
-            else:
-                self.send_error(404, "Nothing here. The homepage is at /")
+            url = urlsplit(self.path)
+            if url.path in ("/", "/index.html"):
+                notice = "Your files were deleted from this computer." if url.query == "deleted=1" else ""
+                return self._send(200, pages.home_page(mock, notice=notice))
+            if url.path == "/favicon.ico":
+                return self._send(204, b"", "image/x-icon")  # no icon; just don't log an error
+            if url.path == "/template.csv":
+                return self._send(200, TEMPLATE_CSV, "text/csv; charset=utf-8",
+                                  [("Content-Disposition", 'attachment; filename="retrack-template.csv"')])
+            match = SESSION_PATH.match(url.path)
+            if not match:
+                return self.send_error(404, "Nothing here. Retrack is at /")
+            session = config.sessions.get(match.group(1))
+            if session is None:
+                return self._gone()
+            getattr(self, "get_" + re.sub(r"[^a-z]", "_", match.group(2)), self._not_found)(session)
 
         def do_POST(self):
-            if urlsplit(self.path).path != "/check":
-                self.send_error(404)
-                return
+            url = urlsplit(self.path)
             if self._from_another_site():
-                self.send_error(403, "Uploads only come from the Retrack page itself.")
-                return
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > MAX_UPLOAD_BYTES:
-                self.close_connection = True  # don't read a huge body we won't use
-                self._answer(413, error_section("That file is too big",
-                             "Retrack takes catalog files up to 2 MB. Check that you picked the CSV, not a recording."))
-                return
-            body = self.rfile.read(length)
+                return self.send_error(403, "Only the Retrack page itself can send this.")
             try:
-                filename, data = read_upload(self.headers.get("Content-Type", ""), body)
-                results = check_upload(filename, data, make_client, name_matcher)
+                if url.path == "/upload":
+                    return self.post_upload()
+                match = SESSION_PATH.match(url.path)
+                if not match:
+                    return self.send_error(404)
+                session = config.sessions.get(match.group(1))
+                if session is None:
+                    return self._gone()
+                getattr(self, "post_" + re.sub(r"[^a-z]", "_", match.group(2)), self._not_found)(session)
             except UploadError as e:
-                self._answer(400, error_section("Retrack couldn’t check that file", str(e)))
-                return
-            except MLCError as e:
-                self._answer(502, error_section("The MLC didn’t answer",
-                             f"Nothing is wrong with your file. Try again in a minute. ({e})"))
-                return
-            self._answer(200, results_section(results, filename, mock))
+                self._send(400, pages.home_page(mock, error=("Retrack couldn’t use that", str(e))))
+
+        def _not_found(self, session=None):
+            self.send_error(404)
+
+        # -- 1. upload --
+        def post_upload(self):
+            body = self._body(MAX_UPLOAD_BYTES)
+            filename, data = read_upload(self.headers.get("Content-Type", ""), body)
+            check_file_type(filename)
+            session = config.sessions.create(filename, data)
+            try:
+                session.table = read_table(session.upload_path)
+            except CatalogImportError as e:
+                config.sessions.delete(session.id)  # nothing to keep
+                message = str(e).replace(session.upload_path.name, session.filename)  # their name, not ours
+                raise UploadError(f"{message} Check that it’s your catalog spreadsheet, then try again.")
+            if not session.table.rows:
+                config.sessions.delete(session.id)
+                raise UploadError("Your file has headers but no songs under them. Check that you "
+                                  "exported the whole catalog, then try again.")
+            session.mapping = HeaderRuleMapper().map_columns(session.table.headers, sample_rows(session.table))
+            session.proposed = {f: FieldMap(list(m.columns), m.confidence) for f, m in session.mapping.items()}
+            self._redirect(f"/s/{session.id}/columns")
+
+        # -- 2. columns --
+        def get_columns(self, session):
+            self._send(200, pages.columns_page(session, mock))
+
+        def post_scan(self, session):
+            if session.state == "running":
+                return self._redirect(f"/s/{session.id}/progress")
+            form = self._form()
+            session.settings = {"smart_names": "smart_names" in form, "ai_search": "ai_search" in form}
+            n = len(session.table.headers)
+            chosen = {}
+            for f in FIELDS:
+                raw = form.get("map_writers", []) if f == "writers" else form.get(f"map_{f}", [])[:1]
+                cols = [int(v) for v in raw if v.isdigit() and int(v) < n]
+                kept = cols == session.proposed[f].columns  # unchanged: keep the rules' confidence
+                chosen[f] = FieldMap(cols, session.proposed[f].confidence if kept else 1.0)
+            session.mapping = clean_mapping(chosen, n)
+
+            missing = [pages.FIELD_LABELS[f] for f in REQUIRED if not session.mapping[f].columns]
+            if missing:
+                return self._send(400, pages.columns_page(session, mock, error=(
+                    "Pick the missing columns",
+                    f"Retrack needs a column for {' and '.join(missing)} to check your songs. "
+                    "Choose it from the list, then press Check my songs.")))
+
+            # Same path as the command line: convert, save catalog.csv, read it back with
+            # load_catalog. So the web UI checks exactly what `python -m retrack` would.
+            session.import_result = convert(session.table, session.mapping)
+            write_catalog(session.import_result.rows, session.folder / "catalog.csv")
+            write_problems(session.import_result.problems, session.folder / "import_problems.csv")
+            rows = load_catalog(session.folder / "catalog.csv")
+            if not rows:
+                return self._send(400, pages.columns_page(session, mock, error=(
+                    "No songs with a valid ISRC",
+                    "None of the rows had an ISRC Retrack could use. Check that the ISRC column is the "
+                    "right one; ISRCs look like CC-XXX-YY-NNNNN.")))
+            if len(rows) > MAX_SONGS:
+                return self._send(400, pages.columns_page(session, mock, error=(
+                    "That’s a lot of songs at once",
+                    f"Your file has {len(rows)} songs; Retrack checks up to {MAX_SONGS} at a time. "
+                    "Split the spreadsheet into parts and upload each one.")))
+
+            try:
+                name_matcher = (WatchedNameMatcher(config.make_name_matcher(), session)
+                                if session.settings["smart_names"] else None)
+                work_searcher = (WatchedWorkSearcher(config.make_work_searcher(), session)
+                                 if session.settings["ai_search"] else None)
+            except Exception:  # no anthropic package, no API key...
+                return self._send(503, pages.columns_page(session, mock, error=CLAUDE_MISSING))
+
+            session.rows, session.results, session.done = rows, [], 0
+            session.error, session.claude_failures, session.state = None, 0, "running"
+            threading.Thread(target=run_scan, daemon=True,
+                             args=(session, config.make_client, name_matcher, work_searcher)).start()
+            self._redirect(f"/s/{session.id}/progress")
+
+        # -- 3. check --
+        def get_progress(self, session):
+            if session.state == "done":
+                return self._redirect(f"/s/{session.id}/results")
+            if session.state == "failed":
+                title, message = session.error
+                retry = (f'<a class="btn" href="/s/{session.id}/columns">Back to the columns</a>'
+                         '<a href="/">Upload a different file</a>')
+                return self._send(502, pages.error_page(title, message, mock, step="check", action=retry))
+            if session.state == "columns":
+                return self._redirect(f"/s/{session.id}/columns")
+            self._send(200, pages.progress_page(session, mock))
+
+        def get_status(self, session):
+            nxt = {"done": "results", "failed": "progress", "columns": "columns"}.get(session.state, "progress")
+            self._send(200, json.dumps({"state": session.state, "done": session.done, "total": session.total,
+                                        "text": pages.progress_text(session), "next": f"/s/{session.id}/{nxt}"}),
+                       "application/json")
+
+        # -- 4. report --
+        def get_results(self, session):
+            if session.state != "done":
+                return self._redirect(f"/s/{session.id}/progress")
+            self._send(200, pages.results_page(session, mock))
+
+        def get_report_html(self, session):
+            if session.state != "done":
+                return self._redirect(f"/s/{session.id}/progress")
+            html = render_html(session.results, catalog_name=session.filename, mock=mock)
+            self._send(200, html, headers=[("Content-Disposition", 'attachment; filename="retrack-report.html"')])
+
+        def get_import_problems_csv(self, session):
+            path = session.folder / "import_problems.csv"
+            if not path.exists():
+                return self._not_found()
+            self._send(200, path.read_bytes(), "text/csv; charset=utf-8",
+                       [("Content-Disposition", 'attachment; filename="import_problems.csv"')])
+
+        # -- 5. fix pack --
+        def _chosen(self, session, values):
+            n = len(session.results)
+            chosen = sorted({int(v) for v in values if v.isdigit() and int(v) < n})
+            return [i for i in chosen if fix_kind(session.results[i])]
+
+        def post_fix(self, session):
+            if session.state != "done":
+                return self._redirect(f"/s/{session.id}/progress")
+            chosen = self._chosen(session, self._form().get("song", []))
+            if not chosen:
+                return self._send(400, pages.results_page(session, mock, error=(
+                    "No songs ticked", "Tick at least one song to fix, then press Review my fix pack.")))
+            plan = plan_fixes([session.results[i] for i in chosen])
+            self._send(200, pages.review_page(session, plan, chosen, mock))
+
+        def post_fix_download(self, session):
+            if session.state != "done":
+                return self._redirect(f"/s/{session.id}/progress")
+            fields = parse_multipart(self.headers.get("Content-Type", ""), self._body(MAX_UPLOAD_BYTES))
+            chosen = self._chosen(session, [v for v in fields.get("song", []) if isinstance(v, str)])
+            if not chosen:
+                return self._redirect(f"/s/{session.id}/results")
+            plan = plan_fixes([session.results[i] for i in chosen])
+
+            # No attestation, no fix pack: checked here, on the server, not just by the
+            # checkbox's "required" attribute (which a browser or script can skip).
+            if fields.get("attest") != ["yes"]:
+                return self._send(400, pages.review_page(session, plan, chosen, mock, error=(
+                    "No confirmation, no fix pack",
+                    "Tick the box to confirm you reviewed the data and control the shares, "
+                    "then press Download again. No files were made.")))
+
+            template_path = None
+            uploads = [v for v in fields.get("template", []) if isinstance(v, tuple) and v[1]]
+            if uploads:
+                template_path = session.folder / "template.xlsx"
+                template_path.write_bytes(uploads[0][1])
+                try:
+                    check_template(template_path)
+                except FixPackError as e:
+                    template_path.unlink(missing_ok=True)
+                    return self._send(400, pages.review_page(session, plan, chosen, mock, error=(
+                        "Retrack couldn’t use that template", f"{e} Or leave it out to get a worksheet instead.")))
+
+            attestation = confirm("ticked the confirmation box on the Retrack page")
+            with tempfile.TemporaryDirectory(dir=session.folder) as out:
+                try:
+                    written = build_fix_pack(plan, out, attestation, template_path)
+                except FixPackError as e:
+                    return self._send(400, pages.review_page(session, plan, chosen, mock,
+                                                             error=("Retrack couldn’t make the fix pack", str(e))))
+                buffer = io.BytesIO()
+                with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
+                    for name in written:
+                        z.write(Path(out) / name, f"fix_pack/{name}")
+            stamp = datetime.date.today().strftime("%Y%m%d")
+            self._send(200, buffer.getvalue(), "application/zip",
+                       [("Content-Disposition", f'attachment; filename="retrack-fix-pack-{stamp}.zip"')])
+
+        # -- delete --
+        def post_delete(self, session):
+            config.sessions.delete(session.id)
+            self._redirect("/?deleted=1")
 
         def log_message(self, format, *args):
             pass  # keep the terminal quiet
 
-    return HomeHandler
+    return Handler
 
 
-def start_server(make_client, name_matcher=None, mock=False, host=HOST, port=PORT):
-    return ThreadingHTTPServer((host, port), make_handler(make_client, name_matcher, mock))
+def start_server(make_client, mock=False, host=HOST, port=PORT, sessions=None,
+                 make_name_matcher=None, make_work_searcher=None):
+    """Open the port and return the server (not running yet). port=0 picks any free port.
+
+    The server always listens on `host`, which defaults to 127.0.0.1 (this computer only).
+    """
+    sessions = sessions or SessionStore()  # clears leftovers from a crashed run
+    if make_name_matcher is None:
+        make_name_matcher = MockNameMatcher if mock else ClaudeNameMatcher
+    if make_work_searcher is None:
+        make_work_searcher = MockWorkSearcher if mock else ClaudeWorkSearcher
+    config = Config(make_client, mock, sessions, make_name_matcher, make_work_searcher)
+    server = ThreadingHTTPServer((host, port), make_handler(config))
+    server.sessions = sessions
+    return server
 
 
 def main(argv=None, open_browser=webbrowser.open):
-    parser = argparse.ArgumentParser(description="Run the Retrack homepage on this computer.")
-    parser.add_argument("--mock", action="store_true", help="check uploads against the fake data in fixtures/")
+    parser = argparse.ArgumentParser(description="Run the Retrack web UI on this computer.")
+    parser.add_argument("--mock", action="store_true", help="sample data from fixtures/: nothing leaves this computer")
     parser.add_argument("--port", type=int, default=PORT, help=f"port to use (default: {PORT})")
     args = parser.parse_args(argv)
 
     if args.mock:
-        make_client, name_matcher = MockClient, MockNameMatcher()
+        make_client = MockClient
     else:
         try:
             MLCClient()  # fail now, with a clear message, if the login details are missing
         except MLCError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
-        make_client, name_matcher = MLCClient, None
+        make_client = MLCClient
 
     try:
-        server = start_server(make_client, name_matcher, args.mock, port=args.port)
+        server = start_server(make_client, args.mock, port=args.port)
     except OSError:
         print(port_busy_message(args.port))
         return 1
-    return run_until_stopped(server, open_browser)
+    previous = stop_on_signals()
+    try:
+        return run_until_stopped(server, open_browser)
+    finally:
+        server.sessions.delete_all()  # uploaded files never outlive the server
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def stop_on_signals():
+    """Make every normal way of stopping the server run its clean-up.
+
+    Ctrl+C sends SIGINT, closing the terminal window sends SIGHUP and `kill`
+    sends SIGTERM. Only the first stops Python politely by default (and not
+    even that when started in the background), so all three are turned into
+    the same KeyboardInterrupt, which makes main() delete the uploaded files.
+    Returns the old handlers so they can be put back.
+    """
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = {}
+    for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)  # SIGHUP doesn't exist on Windows
+        if sig is not None:
+            previous[sig] = signal.signal(sig, stop)
+    return previous
 
 
 if __name__ == "__main__":
