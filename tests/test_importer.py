@@ -208,10 +208,72 @@ def test_claude_failure_falls_back_to_header_rules(tmp_path):
     assert len(list(csv.DictReader(out.open()))) == 6
 
 
-def test_mock_needs_no_api_key(tmp_path, monkeypatch):
+# ---- Which mapper runs: offline by default, Claude only with --smart-import ------------
+
+class NoClaude:
+    """Stands in for ClaudeColumnMapper and fails the test if anyone creates it."""
+
+    def __init__(self, *a, **kw):
+        raise AssertionError("Claude was used without --smart-import")
+
+
+def test_default_import_is_offline_and_needs_no_api_key(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    code, out = run_import(tmp_path, MESSY, "--mock", "--yes")
+    monkeypatch.setattr(importer, "ClaudeColumnMapper", NoClaude)
+    code, out = run_import(tmp_path, MESSY, "--yes")
     assert code == 0 and out.exists()
+
+
+def test_smart_import_uses_claude(tmp_path, monkeypatch):
+    fake = FakeAnthropic(ANSWER)
+    monkeypatch.setattr(importer, "ClaudeColumnMapper", lambda: ClaudeColumnMapper(client=fake))
+    code, _ = run_import(tmp_path, MESSY, "--smart-import", "--yes")
+    assert code == 0 and fake.calls == 1
+
+
+def test_smart_import_with_mock_stays_offline(tmp_path, monkeypatch):
+    monkeypatch.setattr(importer, "ClaudeColumnMapper", NoClaude)
+    code, _ = run_import(tmp_path, MESSY, "--smart-import", "--mock", "--yes")
+    assert code == 0
+
+
+def run_printed(tmp_path, src, *extra):
+    printed = []
+    importer.main([str(src), "--out", str(tmp_path / "c.csv"), *extra], print_fn=printed.append)
+    return "\n".join(printed)
+
+
+def test_missing_field_suggests_smart_import(tmp_path):
+    text = run_printed(tmp_path, DISTROKID, "--yes")  # an earnings export has no writer column
+    assert "weren't sure about: writers (no column)" in text
+    assert "rerun with --smart-import" in text
+
+
+def test_low_confidence_field_suggests_smart_import():
+    m = HeaderRuleMapper().map_columns(["Track", "ISRC", "Writer", "Performer"], [])
+    assert importer.unclear_fields(m) == []  # all found, all at least 60% sure
+    m["title"].confidence = 0.4
+    assert importer.smart_import_hint(m).startswith("The offline rules weren't sure about: title (40%)")
+
+
+def test_no_hint_when_the_rules_are_sure(tmp_path):
+    assert "--smart-import" not in run_printed(tmp_path, TUNECORE, "--yes")
+
+
+def test_no_hint_when_claude_did_the_mapping(tmp_path):
+    answer = dict(ANSWER, writers={"columns": [], "confidence": 0.0})
+    printed = []
+    importer.main([str(MESSY), "--out", str(tmp_path / "c.csv"), "--yes"], print_fn=printed.append,
+                  mapper=ClaudeColumnMapper(client=FakeAnthropic(answer)))
+    assert "--smart-import" not in "\n".join(printed)
+
+
+def test_hint_is_shown_at_the_prompt_too(tmp_path):
+    printed = []
+    importer.main([str(DISTROKID), "--out", str(tmp_path / "c.csv")], print_fn=printed.append,
+                  input_fn=answers("y"), stdin_is_tty=True)
+    text = "\n".join(printed)
+    assert text.index("→ writers") < text.index("--smart-import")  # right under the mapping
 
 
 # ---- Confirming the mapping ---------------------------------------------------------
@@ -260,31 +322,31 @@ def test_user_can_pick_a_column_by_header_name():
 
 
 def test_cli_without_terminal_or_yes_converts_nothing(tmp_path):
-    code, out = run_import(tmp_path, MESSY, "--mock", stdin_is_tty=False)
+    code, out = run_import(tmp_path, MESSY, stdin_is_tty=False)
     assert code == 1 and not out.exists()
 
 
 def test_cli_answering_no_converts_nothing(tmp_path):
-    code, out = run_import(tmp_path, MESSY, "--mock", stdin_is_tty=True, input_fn=answers("n"))
+    code, out = run_import(tmp_path, MESSY, stdin_is_tty=True, input_fn=answers("n"))
     assert code == 1 and not out.exists()
 
 
 def test_cli_answering_yes_converts(tmp_path):
-    code, out = run_import(tmp_path, MESSY, "--mock", stdin_is_tty=True, input_fn=answers("y"))
+    code, out = run_import(tmp_path, MESSY, stdin_is_tty=True, input_fn=answers("y"))
     assert code == 0 and out.exists()
 
 
 def test_no_title_or_isrc_column_stops_the_import(tmp_path):
     f = tmp_path / "x.csv"
     f.write_text("Foo,Bar\nhello,world\nmore,stuff\n")
-    code, out = run_import(tmp_path, f, "--mock", "--yes")
+    code, out = run_import(tmp_path, f, "--yes")
     assert code == 1 and not out.exists()
 
 
 def test_out_cannot_overwrite_the_input(tmp_path):
     f = tmp_path / "catalog.csv"
     f.write_text("title,artist,isrc,writers\nS,A,QZABC2400001,W X\n")
-    assert importer.main([str(f), "--out", str(f), "--mock", "--yes"]) == 1
+    assert importer.main([str(f), "--out", str(f), "--yes"]) == 1
 
 
 # ---- Cleanup rule: ISRCs --------------------------------------------------------------
@@ -418,7 +480,7 @@ def test_every_row_is_accounted_for(messy):
 # ---- Output -------------------------------------------------------------------------
 
 def test_output_is_a_catalog_retrack_can_check(tmp_path):
-    code, out = run_import(tmp_path, MESSY, "--mock", "--yes")
+    code, out = run_import(tmp_path, MESSY, "--yes")
     assert code == 0
     rows = load_catalog(out)
     assert [r.isrc for r in rows][:3] == ["QZABC2400001", "QZABC2400002", "QZABC2400003"]
@@ -428,7 +490,7 @@ def test_output_is_a_catalog_retrack_can_check(tmp_path):
 
 
 def test_problems_file_lists_row_numbers(tmp_path):
-    run_import(tmp_path, MESSY, "--mock", "--yes")
+    run_import(tmp_path, MESSY, "--yes")
     rows = list(csv.DictReader((tmp_path / "import_problems.csv").open()))
     assert [r["row"] for r in rows] == ["9", "10", "11", "12", "14"]
     assert rows[0].keys() == {"row", "field", "value", "problem", "what happened"}
@@ -436,7 +498,7 @@ def test_problems_file_lists_row_numbers(tmp_path):
 
 def test_summary_shows_rows_in_and_out_and_problems(tmp_path):
     printed = []
-    importer.main([str(MESSY), "--out", str(tmp_path / "c.csv"), "--mock", "--yes"], print_fn=printed.append)
+    importer.main([str(MESSY), "--out", str(tmp_path / "c.csv"), "--yes"], print_fn=printed.append)
     text = "\n".join(printed)
     assert "Rows in: 9. Rows out: 6" in text
     assert "5 problems" in text and "row 10:" in text
@@ -445,6 +507,6 @@ def test_summary_shows_rows_in_and_out_and_problems(tmp_path):
 
 def test_import_is_a_retrack_subcommand(tmp_path, capsys):
     out = tmp_path / "c.csv"
-    assert retrack_main(["import", str(TUNECORE), "--out", str(out), "--mock", "--yes"]) == 0
+    assert retrack_main(["import", str(TUNECORE), "--out", str(out), "--yes"]) == 0
     assert out.exists()
     assert "Rows in: 4. Rows out: 4" in capsys.readouterr().out

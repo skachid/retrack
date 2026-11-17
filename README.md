@@ -22,14 +22,14 @@ With `--ai-search`, a red song is split into one of two cases:
 You don't need to reformat your catalog. Retrack can read the spreadsheet you already have (a DistroKid or TuneCore export, or your own sheet) and turn it into its four-column CSV:
 
 ```bash
-python -m retrack import my_catalog.xlsx --out catalog.csv          # uses the Claude API to read the columns
-python -m retrack import my_catalog.xlsx --out catalog.csv --mock   # offline rules, no API key
-python -m retrack catalog.csv --mock                                # then check it as usual
+python -m retrack import my_catalog.xlsx --out catalog.csv                  # offline rules, no API key
+python -m retrack import my_catalog.xlsx --out catalog.csv --smart-import   # let Claude read the columns
+python -m retrack catalog.csv --mock                                        # then check it as usual
 ```
 
 It takes `.csv` and `.xlsx` with any columns, title rows above the headers, blank rows, merged cells, and semicolon-separated "European" CSVs.
 
-**Step 1: which column is which.** Retrack sends Claude **only the header row and the first 5 rows**. Claude replies with which column holds the title, artist, ISRC and writers, and how sure it is. You see the result and confirm it, edit it, or cancel:
+**Step 1: which column is which.** By default Retrack works this out offline, from the header names (and from the values, for an unlabelled ISRC column). Nothing leaves your computer. You see the result and confirm it, edit it, or cancel:
 
 ```
 Song Name (B) → title (90%)
@@ -39,7 +39,9 @@ Composer(s) (E) → writers (90%)
 Use this? [y]es / [e]dit / [n]o:
 ```
 
-Pass `--yes` in scripts to skip the question. With `--mock`, or if Claude doesn't answer, Retrack uses offline rules based on the header names instead.
+Pass `--yes` in scripts to skip the question.
+
+If the offline rules can't find a column, or aren't sure about one, Retrack says so and suggests `--smart-import`. Like `--smart-names` and `--ai-search`, it's opt-in: Claude is sent **only the header row and the first 5 rows** and replies with which column is which and how sure it is. It needs `ANTHROPIC_API_KEY`, and you still confirm the result. If Claude doesn't answer, Retrack falls back to the offline rules. `--smart-import --mock` stays offline.
 
 **Step 2: converting.** Plain Python reads every row using that mapping. The AI never sees or changes the rest of your data. While converting, it:
 
@@ -177,7 +179,7 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 | `retrack/checker.py` | The rules that decide red/yellow/green and the fix steps. |
 | `retrack/name_matcher.py` | Second-pass name check: `ClaudeNameMatcher` (Claude API) and `MockNameMatcher` (offline rules). |
 | `retrack/work_search.py` | `--ai-search`: searches by title/writers. `ClaudeWorkSearcher` (Claude API) and `MockWorkSearcher` (offline rules). Only suggests; `checker.py` decides. |
-| `retrack/importer.py` | `import`: reads any .csv/.xlsx, maps the columns (Claude, or offline rules), cleans the data, writes `catalog.csv` and `import_problems.csv`. |
+| `retrack/importer.py` | `import`: reads any .csv/.xlsx, maps the columns (offline rules, or Claude with `--smart-import`), cleans the data, writes `catalog.csv` and `import_problems.csv`. |
 | `retrack/fixes.py` | The fix pack: plans which songs get which fix, checks the attestation, fills a copy of your MLC template, writes the other files. |
 | `retrack/compliance.py` | The disclaimer, the "never" text and the attestation wording, in one place. |
 | `retrack/report.py` | Prints the summary, writes the CSV and builds the HTML report. |

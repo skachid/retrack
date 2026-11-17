@@ -1,8 +1,8 @@
 """Catalog import: turn whatever spreadsheet a label already has into Retrack's CSV.
 
-    python -m retrack import messy_file.xlsx --out catalog.csv
-    python -m retrack import messy_file.xlsx --out catalog.csv --mock   # no AI, no API key
-    python -m retrack import export.csv --out catalog.csv --yes         # scripts: no questions
+    python -m retrack import messy_file.xlsx --out catalog.csv                  # offline rules (default)
+    python -m retrack import messy_file.xlsx --out catalog.csv --smart-import   # Claude reads the columns
+    python -m retrack import export.csv --out catalog.csv --yes                 # scripts: no questions
 
 How it works, in two steps:
   (a) Map the columns. A "column mapper" looks at the header row and up to
@@ -14,9 +14,11 @@ How it works, in two steps:
       data: it only ever gets the header row and the sample rows.
 
 There are two mappers with the same method, map_columns(headers, samples):
-  ClaudeColumnMapper - asks the Claude API (needs an Anthropic API key).
-  HeaderRuleMapper   - offline rules based on header names, used with --mock,
-                       and as the fallback if the Claude API doesn't answer.
+  HeaderRuleMapper   - offline rules based on header names. The default, like
+                       every AI feature in Retrack being opt-in. Also the
+                       fallback if the Claude API doesn't answer.
+  ClaudeColumnMapper - asks the Claude API (opt-in with --smart-import; needs an
+                       Anthropic API key). --mock keeps it offline.
 
 Cleanup rules (all plain Python, all in this file):
   - ISRCs: dashes, spaces and dots removed, upper-cased. Anything that isn't
@@ -436,13 +438,33 @@ def parse_column_answer(answer, headers):
     return cols
 
 
-def confirm_mapping(mapping, headers, input_fn=input, print_fn=print):
+def unclear_fields(mapping):
+    """Fields the mapper found no column for, or isn't sure about."""
+    return [f for f in FIELDS if not mapping[f].columns or mapping[f].confidence < LOW_CONFIDENCE]
+
+
+def smart_import_hint(mapping):
+    """For the offline rules only: point at --smart-import when they're unsure."""
+    unclear = unclear_fields(mapping)
+    if not unclear:
+        return ""
+    parts = [f"{f} ({'no column' if not mapping[f].columns else f'{mapping[f].confidence:.0%}'})"
+             for f in unclear]
+    return (f"The offline rules weren't sure about: {', '.join(parts)}. You can pick the columns "
+            "yourself, or rerun with --smart-import to let Claude read the header row and the "
+            f"first {SAMPLE_ROWS} rows.")
+
+
+def confirm_mapping(mapping, headers, input_fn=input, print_fn=print, hint=""):
     """Show the mapping; let the user accept, correct or cancel. Returns the
     final mapping, or None if they cancelled."""
     while True:
         print_fn("\nRetrack's reading of your columns:")
         for line in describe_mapping(mapping, headers):
             print_fn(f"  {line}")
+        if hint:
+            print_fn(hint)
+            hint = ""  # once is enough
         try:
             answer = input_fn("Use this? [y]es / [e]dit / [n]o: ").strip().lower()
         except EOFError:
@@ -632,8 +654,12 @@ def main(argv=None, input_fn=input, stdin_is_tty=None, mapper=None, print_fn=pri
         description="Turn your own spreadsheet (.csv or .xlsx, any columns) into Retrack's catalog CSV.")
     parser.add_argument("file", help="your spreadsheet: .csv or .xlsx")
     parser.add_argument("--out", default="catalog.csv", help="where to save the catalog (default: catalog.csv)")
+    parser.add_argument("--smart-import", action="store_true",
+                        help="let the Claude API work out which column is which. It's sent only the "
+                             f"header row and the first {SAMPLE_ROWS} rows; needs ANTHROPIC_API_KEY. "
+                             "Without it, offline header-name rules are used.")
     parser.add_argument("--mock", action="store_true",
-                        help="map columns with offline header-name rules instead of the Claude API (no key needed)")
+                        help="stay offline: with --smart-import, use the header-name rules instead of Claude")
     parser.add_argument("--yes", action="store_true", help="for scripts: use the column mapping without asking")
     args = parser.parse_args(argv)
 
@@ -651,24 +677,29 @@ def main(argv=None, input_fn=input, stdin_is_tty=None, mapper=None, print_fn=pri
     samples = sample_rows(table)
 
     if mapper is None:
-        if args.mock:
-            mapper = HeaderRuleMapper()
+        if not args.smart_import or args.mock:
+            mapper = HeaderRuleMapper()  # the default: offline, nothing leaves this computer
         else:
             try:
                 mapper = ClaudeColumnMapper()
             except ImportError:
-                print("Error: the AI column mapping needs the anthropic package: pip install anthropic "
-                      "(or use --mock for the offline rules).", file=sys.stderr)
+                print("Error: --smart-import needs the anthropic package: pip install anthropic "
+                      "(or leave out --smart-import to use the offline rules).", file=sys.stderr)
                 return 1
     mapping = mapper.map_columns(table.headers, samples)
+    hint = ""
     if mapping is None:  # fail safe: the AI didn't answer, use the offline rules
         print_fn("The AI column mapping didn't answer, so Retrack used its offline header rules instead.")
         mapping = HeaderRuleMapper().map_columns(table.headers, samples)
+    elif isinstance(mapper, HeaderRuleMapper):
+        hint = smart_import_hint(mapping)
 
     print_fn(f"Header row: row {table.header_row} of {Path(args.file).name}")
     if args.yes:
         for line in describe_mapping(mapping, table.headers):
             print_fn(f"  {line}")
+        if hint:
+            print_fn(hint)
     else:
         if stdin_is_tty is None:
             stdin_is_tty = sys.stdin.isatty()
@@ -676,7 +707,7 @@ def main(argv=None, input_fn=input, stdin_is_tty=None, mapper=None, print_fn=pri
             print("Error: Retrack needs you to confirm the column mapping. Run it in a terminal, "
                   "or pass --yes.", file=sys.stderr)
             return 1
-        mapping = confirm_mapping(mapping, table.headers, input_fn, print_fn)
+        mapping = confirm_mapping(mapping, table.headers, input_fn, print_fn, hint)
         if mapping is None:
             print_fn("Cancelled. Nothing was converted.")
             return 1
@@ -684,7 +715,7 @@ def main(argv=None, input_fn=input, stdin_is_tty=None, mapper=None, print_fn=pri
     missing = [f for f in REQUIRED if not mapping[f].columns]
     if missing:
         print(f"Error: no column chosen for {' and '.join(missing)}, so there's nothing to check. "
-              "Run again without --yes and pick the columns.", file=sys.stderr)
+              "Run again without --yes and pick the columns, or with --smart-import.", file=sys.stderr)
         return 1
 
     result = convert(table, mapping)
