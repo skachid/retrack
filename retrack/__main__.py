@@ -1,5 +1,6 @@
 """Command line entry point.
 
+    python -m retrack import my_sheet.xlsx --out catalog.csv   # any spreadsheet -> catalog.csv
     python -m retrack catalog.csv --mock
     python -m retrack catalog.csv --out report.csv
     python -m retrack catalog.csv --smart-names   # needs ANTHROPIC_API_KEY
@@ -15,6 +16,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import importer
 from .checker import check_catalog, load_catalog
 from .fixes import (FIXES_DIR, TEMPLATE_HELP, FixPackError, ask_for_attestation, build_fix_pack,
                     check_template, confirm, plan_fixes, price_line)
@@ -26,6 +28,10 @@ from .report import print_summary, render_html, write_csv
 
 
 def main(argv=None, input_fn=input, stdin_is_tty=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["import"]:  # python -m retrack import my_sheet.xlsx --out catalog.csv
+        return importer.main(argv[1:], input_fn=input_fn, stdin_is_tty=stdin_is_tty)
+
     parser = argparse.ArgumentParser(description="Check a music catalog against The MLC for royalty gaps.")
     parser.add_argument("catalog", help="CSV with columns: title, artist, isrc, writers (writers split by ';')")
     parser.add_argument("--out", default="report.csv", help="where to save the CSV report (default: report.csv)")

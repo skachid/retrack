@@ -17,6 +17,39 @@ With `--ai-search`, a red song is split into one of two cases:
 | Registered but not linked to your recording | The song is at The MLC (found by title and writers, maybe spelled a bit differently) but not linked to your ISRC. | Confirm it's yours, claim it, attach the ISRC. Don't register it again. |
 | Not found anywhere | No recording for the ISRC, and no song under the title or writer names either. | Register it from scratch. |
 
+## Bring your own spreadsheet (`import`)
+
+You don't need to reformat your catalog. Retrack can read the spreadsheet you already have (a DistroKid or TuneCore export, or your own sheet) and turn it into its four-column CSV:
+
+```bash
+python -m retrack import my_catalog.xlsx --out catalog.csv          # uses the Claude API to read the columns
+python -m retrack import my_catalog.xlsx --out catalog.csv --mock   # offline rules, no API key
+python -m retrack catalog.csv --mock                                # then check it as usual
+```
+
+It takes `.csv` and `.xlsx` with any columns, title rows above the headers, blank rows, merged cells, and semicolon-separated "European" CSVs.
+
+**Step 1: which column is which.** Retrack sends Claude **only the header row and the first 5 rows**. Claude replies with which column holds the title, artist, ISRC and writers, and how sure it is. You see the result and confirm it, edit it, or cancel:
+
+```
+Song Name (B) → title (90%)
+Performer (C) → artist (80%)
+ISRC code (D) → isrc (95%)
+Composer(s) (E) → writers (90%)
+Use this? [y]es / [e]dit / [n]o:
+```
+
+Pass `--yes` in scripts to skip the question. With `--mock`, or if Claude doesn't answer, Retrack uses offline rules based on the header names instead.
+
+**Step 2: converting.** Plain Python reads every row using that mapping. The AI never sees or changes the rest of your data. While converting, it:
+
+- **Cleans ISRCs**: removes dashes, spaces and dots and upper-cases them. A code that isn't 12 characters (country, registrant, year, number) is flagged, and that row isn't imported.
+- **Splits writers** on `;`, `/`, `&`, `and` and line breaks, and on commas only when each piece is a full name ("John Smith, Ana Lopez"). `Smith, John` could be one person or two, so it's left as it is and flagged.
+- **Drops duplicates**: rows that are exactly the same after mapping, like an earnings export listing one song per store.
+- **Flags, never silently drops**, rows with no ISRC (not imported) or no writers (imported, so you can check them).
+
+At the end you get a summary (rows in, rows out, each problem with its spreadsheet row number), and the problems are saved to `import_problems.csv` next to your catalog.
+
 ## Run it
 
 ```bash
@@ -144,6 +177,7 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 | `retrack/checker.py` | The rules that decide red/yellow/green and the fix steps. |
 | `retrack/name_matcher.py` | Second-pass name check: `ClaudeNameMatcher` (Claude API) and `MockNameMatcher` (offline rules). |
 | `retrack/work_search.py` | `--ai-search`: searches by title/writers. `ClaudeWorkSearcher` (Claude API) and `MockWorkSearcher` (offline rules). Only suggests; `checker.py` decides. |
+| `retrack/importer.py` | `import`: reads any .csv/.xlsx, maps the columns (Claude, or offline rules), cleans the data, writes `catalog.csv` and `import_problems.csv`. |
 | `retrack/fixes.py` | The fix pack: plans which songs get which fix, checks the attestation, fills a copy of your MLC template, writes the other files. |
 | `retrack/compliance.py` | The disclaimer, the "never" text and the attestation wording, in one place. |
 | `retrack/report.py` | Prints the summary, writes the CSV and builds the HTML report. |
@@ -154,6 +188,7 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 | `tests/test_checker.py` | One test per verdict, plus name and ISRC cleanup. |
 | `tests/test_web.py` | The homepage: uploads, errors, results on the same page, refusing other websites. |
 | `tests/test_work_search.py` | `--ai-search`: the song-code search, the search limits, both searchers, and the two red cases. |
+| `tests/test_importer.py` | `import`: reading messy files, both mappers, the confirmation step, every cleanup rule, and a test proving only the header + 5 rows reach Claude. |
 | `tests/test_fixes.py` | The fix pack and the compliance rules: no files without attestation, ownership never guessed, one price for every verdict. |
 | `tests/test_html_report.py` | The HTML report (order, counts, escaping, offline, print) and the preview server. |
 
