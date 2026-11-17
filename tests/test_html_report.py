@@ -45,11 +45,28 @@ def test_red_songs_come_first_then_yellow_then_green(html):
 def test_each_card_shows_its_problems_and_fix_steps(html):
     assert "The MLC has no recording with this ISRC." in html
     assert "Register the song (composition) with The MLC, listing this ISRC." in html
-    assert html.count('<article class="song') == 5
+    assert html.count('<details class="song') == 5
+
+
+def test_saved_report_opens_every_row(html):
+    # paper and email can't be clicked, so every song's details start open
+    assert html.count('<details class="song') == html.count(" open>")
+
+
+def test_collapsed_row_shows_the_main_problem():
+    from retrack.report import groups_html
+    row = CatalogRow(title="Song", artist="Artist", isrc="QZ1", writers=[])
+    out = groups_html([Result(row, RED, problems=["First thing.", "Second thing."], fixes=["Fix."])],
+                      expanded=False)
+    assert " open>" not in out
+    assert "First thing." in out.split("</summary>")[0]   # visible without opening
+    assert "and 1 more" in out
 
 
 def test_green_song_says_nothing_to_fix(html):
-    assert "Nothing to fix." in html
+    green = html[html.index("Late Night Drive"):]
+    body = green.split("</summary>")[1]
+    assert "Nothing to fix." in body  # in the details too, since printed rows hide the summary line
 
 
 def test_sample_data_is_labelled_as_sample(html):

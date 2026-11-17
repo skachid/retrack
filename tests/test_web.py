@@ -31,8 +31,9 @@ def test_homepage_has_upload_form_and_steps():
     page = web.render_home()
     assert 'enctype="multipart/form-data"' in page
     assert 'name="catalog" type="file"' in page
-    assert "Get your file ready" in page
-    assert page.count('<li><div><h3>') == 3  # the three steps
+    assert page.count("How it works") == 2      # the top link and the section heading
+    assert 'href="#how"' in page and 'id="how"' in page
+    assert page.count('<li><h3>') == 4         # the four steps
 
 
 def test_homepage_shows_no_test_data():
@@ -130,6 +131,14 @@ def test_upload_shows_results_on_the_same_page(server):
     assert "Find the royalties your songs are missing." in page  # still the homepage
     assert "Results for mine.csv" in page
     assert page.index("Ghost Signal") < page.index("Late Night Drive")  # red before green
+
+
+def test_results_on_the_page_start_collapsed_with_filters(server):
+    _, fragment = post(server, headers={"X-Retrack-Fragment": "1"})
+    assert fragment.count('<details class="song') == 5
+    assert " open>" not in fragment
+    assert 'data-filter="red"' in fragment and 'data-filter="green"' in fragment
+    assert '<div class="filters" role="group" aria-label="Show songs" hidden>' in fragment  # off until JS
 
 
 def test_script_gets_just_the_results(server):

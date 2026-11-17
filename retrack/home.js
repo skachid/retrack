@@ -32,10 +32,39 @@
     }
   });
 
+  // Buttons that only work with JavaScript start hidden; show them now.
   function showPrintButtons() {
-    results.querySelectorAll("[data-print]").forEach(function (b) { b.hidden = false; });
+    results.querySelectorAll("[data-print], .filters").forEach(function (el) { el.hidden = false; });
   }
   showPrintButtons();
+
+  // Filter buttons: show one colour group at a time ("all" shows every group).
+  function filterTo(status) {
+    results.querySelectorAll("[data-filter]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.filter === status));
+    });
+    results.querySelectorAll(".group[data-status]").forEach(function (g) {
+      g.hidden = status !== "all" && g.dataset.status !== status;
+    });
+  }
+
+  // "Open all" / "Close all" for the song rows.
+  function toggleAll(button) {
+    var rows = results.querySelectorAll(".song");
+    var open = button.textContent === "Open all";
+    rows.forEach(function (row) { row.open = open; });
+    button.textContent = open ? "Close all" : "Open all";
+  }
+
+  // Paper can't be clicked: open every row and show every group while printing.
+  var openBeforePrint = [];
+  window.addEventListener("beforeprint", function () {
+    openBeforePrint = Array.prototype.filter.call(results.querySelectorAll(".song"), function (r) { return r.open; });
+    results.querySelectorAll(".song").forEach(function (r) { r.open = true; });
+  });
+  window.addEventListener("afterprint", function () {
+    results.querySelectorAll(".song").forEach(function (r) { r.open = openBeforePrint.indexOf(r) !== -1; });
+  });
 
   function showResults(html) {
     results.innerHTML = html;
@@ -74,6 +103,10 @@
   });
 
   results.addEventListener("click", function (e) {
+    var filter = e.target.closest("[data-filter]");
+    if (filter) filterTo(filter.dataset.filter);
+    var expand = e.target.closest("[data-expand]");
+    if (expand) toggleAll(expand);
     if (e.target.closest("[data-print]")) window.print();
   });
 })();

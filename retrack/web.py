@@ -102,8 +102,26 @@ def results_section(results, filename, mock):
       <button type="button" class="btn btn--quiet" data-print hidden>Print or save as PDF</button>
     </div>
     {summary_html(results, mock)}
-    {groups_html(results)}
+    {filter_bar(results)}
+    <div class="song-list">{groups_html(results, expanded=False)}</div>
   </div>"""
+
+
+def filter_bar(results):
+    """Buttons that show one colour at a time. Hidden until the page's script turns them on,
+    because without JavaScript they couldn't do anything."""
+    if not results:
+        return ""
+    counts = {cls: sum(1 for r in results if GROUPS[r.status][0] == cls) for cls, *_ in GROUPS.values()}
+    buttons = [f'<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="num">{len(results)}</span></button>']
+    for cls, heading, _, _ in GROUPS.values():
+        if counts[cls]:
+            buttons.append(f'<button type="button" class="chip is-{cls}" data-filter="{cls}" aria-pressed="false">'
+                           f'{heading} <span class="num">{counts[cls]}</span></button>')
+    return f"""<div class="filters" role="group" aria-label="Show songs" hidden>
+      {"".join(buttons)}
+      <button type="button" class="chip chip--quiet" data-expand>Open all</button>
+    </div>"""
 
 
 def error_section(title, message):
@@ -155,7 +173,7 @@ def render_home(results_inner="", mock=False):
 <header class="bar">
   <div class="container">
     <a class="wordmark" href="/" aria-label="Retrack home">Retrack</a>
-    <nav aria-label="Page"><a href="#prepare">Get your file ready</a></nav>
+    <nav aria-label="Page"><a href="#how">How it works</a></nav>
   </div>
 </header>
 
@@ -166,7 +184,7 @@ def render_home(results_inner="", mock=False):
         <h1 id="hero-title">Find the royalties your songs are missing.</h1>
         <p class="lead">Upload your catalog and Retrack checks each song’s registration with The MLC.</p>
       </div>
-      <form id="upload" class="upload" action="/check" method="post" enctype="multipart/form-data">
+      <form id="upload" class="upload" aria-label="Upload your catalog" action="/check" method="post" enctype="multipart/form-data">
         <label id="drop" class="drop" for="catalog">
           <span class="drop-title">Drop your catalog CSV here</span>
           <span class="drop-hint">or click to choose a file</span>
@@ -184,28 +202,32 @@ def render_home(results_inner="", mock=False):
 
   <section id="results" class="results" aria-live="polite" aria-label="Results">{results_inner}</section>
 
-  <section id="prepare" class="section" aria-labelledby="prepare-title">
-    <div class="container how">
-      <div>
-        <h2 id="prepare-title">Get your file ready</h2>
-        <p class="lead">Three steps, about five minutes.</p>
-      </div>
-      <div>
-        <ol class="how-steps">
-          <li><div><h3>Export your catalog</h3><p>From your distributor’s dashboard, or copy it from your own spreadsheet.</p></div></li>
-          <li><div><h3>Keep four columns</h3><p>Name them exactly as in the table below, one song per row.</p></div></li>
-          <li><div><h3>Save as CSV and upload</h3><p>Excel: File, Save As, CSV UTF-8. Google Sheets: File, Download, CSV.</p></div></li>
-        </ol>
+  <section id="how" class="section" aria-labelledby="how-title">
+    <div class="container">
+      <h2 id="how-title">How it works</h2>
+      <p class="lead">Four steps, about five minutes.</p>
+      <ol class="how-steps">
+        <li><h3>Export your catalog</h3><p>From your distributor’s dashboard, or your own spreadsheet.</p></li>
+        <li><h3>Keep four columns</h3><p>title, artist, isrc and writers, one song per row.</p></li>
+        <li><h3>Save it as CSV</h3><p>Excel: Save As, CSV UTF-8. Google Sheets: Download, CSV.</p></li>
+        <li><h3>Upload and read</h3><p>Drop it in the <a href="#upload">box at the top</a>. Red songs come first.</p></li>
+      </ol>
+
+      <div class="file-spec">
+        <div>
+          <h3>The four columns</h3>
+          <p>Name them exactly like this in the first row. Extra columns are ignored.</p>
+          <a class="btn btn--quiet" href="/template.csv" download>Download blank template</a>
+        </div>
         <table class="columns">
           <thead><tr><th scope="col">Column</th><th scope="col">What goes in it</th><th scope="col">Looks like</th></tr></thead>
           <tbody>
             <tr><th scope="row"><code>title</code></th><td>The song’s name as released</td><td>Example Song</td></tr>
             <tr><th scope="row"><code>artist</code></th><td>The releasing artist</td><td>Example Artist</td></tr>
-            <tr><th scope="row"><code>isrc</code></th><td>The recording’s 12-character code, from your distributor. Dashes are fine.</td><td><code>CC-XXX-YY-NNNNN</code></td></tr>
+            <tr><th scope="row"><code>isrc</code></th><td>The recording’s 12-character code from your distributor. Dashes are fine.</td><td><code>CC-XXX-YY-NNNNN</code></td></tr>
             <tr><th scope="row"><code>writers</code></th><td>Every songwriter, split by a semicolon</td><td>First Writer; Second Writer</td></tr>
           </tbody>
         </table>
-        <p class="template"><a href="/template.csv">Download a blank template</a> with these headers.</p>
       </div>
     </div>
   </section>

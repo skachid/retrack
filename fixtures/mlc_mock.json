@@ -1,5 +1,6 @@
 {
   "_note": "Fake MLC responses shaped like the real API (public-api.themlc.com/api/doc). Not real data.",
+  "_note_songcode_search": "What POST /search/songcode can find. 'THE BLUE HOUR' (BH3456) is the catalog's 'Blue Hour' under a slightly different title and writer spelling, never linked to its ISRC. 'BLUE HOUR' (BH7777) by someone else is a look-alike that must NOT be matched. CG9013 is a second registration of Concrete Garden listing the writer missing from CG9012.",
   "recordings": {
     "QZABC2400001": [
       {"id": "r1", "isrc": "QZABC2400001", "title": "Late Night Drive", "artist": "Nova Reyes", "labels": "Sunbeam Records", "mlcsongCode": "LA1234"}
@@ -32,6 +33,23 @@
       "primaryTitle": "CONCRETE GARDEN", "mlcSongCode": "CG9012", "iswc": "",
       "writers": [{"writerId": "w3", "writerFirstName": "J.", "writerLastName": "Okafor", "writerIPI": ""}],
       "publishers": []
+    },
+    "BH3456": {
+      "primaryTitle": "THE BLUE HOUR", "mlcSongCode": "BH3456", "iswc": "T9000000055",
+      "writers": [{"writerId": "w5", "writerFirstName": "Jyde", "writerLastName": "Okafor", "writerIPI": ""}],
+      "publishers": []
     }
-  }
+  },
+  "songcode_search": [
+    {"mlcSongCode": "BH3456", "workTitle": "THE BLUE HOUR", "iswc": "T9000000055",
+     "writers": [{"writerId": "w5", "writerFirstName": "Jyde", "writerLastName": "Okafor", "writerIPI": "", "writerRoleCode": "CA"}]},
+    {"mlcSongCode": "BH7777", "workTitle": "BLUE HOUR", "iswc": "T9000000077",
+     "writers": [{"writerId": "w7", "writerFirstName": "Priya", "writerLastName": "Natarajan", "writerIPI": "00000000007", "writerRoleCode": "CA"}]},
+    {"mlcSongCode": "CG9012", "workTitle": "CONCRETE GARDEN", "iswc": "",
+     "writers": [{"writerId": "w3", "writerFirstName": "J.", "writerLastName": "Okafor", "writerIPI": "", "writerRoleCode": "CA"}]},
+    {"mlcSongCode": "CG9013", "workTitle": "CONCRETE GARDEN", "iswc": "",
+     "writers": [{"writerId": "w6", "writerFirstName": "Samuel", "writerLastName": "Lee", "writerIPI": "", "writerRoleCode": "CA"}]},
+    {"mlcSongCode": "LA1234", "workTitle": "LATE NIGHT DRIVE", "iswc": "T9000000011",
+     "writers": [{"writerId": "w1", "writerFirstName": "Nova", "writerLastName": "Reyes", "writerIPI": "00000000001", "writerRoleCode": "CA"}]}
+  ]
 }
