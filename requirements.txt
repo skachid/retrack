@@ -1,3 +1,4 @@
 requests>=2.31
 pytest>=8.0
 anthropic
+openpyxl>=3.1

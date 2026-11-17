@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .checker import check_catalog, parse_catalog
+from .compliance import COMPLIANCE_TEXT
 from .mlc_client import MLCClient, MLCError, MockClient
 from .name_matcher import MockNameMatcher
 from .preview import HOST, PORT, port_busy_message, run_until_stopped
@@ -255,6 +256,7 @@ def render_home(results_inner="", mock=False):
   <div class="container">
     <p>Retrack checks The MLC’s Public Search API, which covers US streaming mechanicals.
     SoundExchange and ASCAP/BMI have no public API, so check those by hand: {manual}.</p>
+    <p class="small compliance">{escape(COMPLIANCE_TEXT)}</p>
   </div>
 </footer>
 <script>

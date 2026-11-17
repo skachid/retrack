@@ -55,6 +55,38 @@ For a song with missing writers, a match is shown as a possible *second registra
 
 Only song titles and writer names are sent to Claude: no audio, no ISRCs, no artist names, no money figures. `--mock --ai-search` uses simple offline rules instead and sends nothing anywhere.
 
+## Fix pack (`--fix`)
+
+The scan is free. The fix pack is the paid part: a flat **$5.00 per fixed song** (a placeholder price, `FIX_PRICE_USD` in `retrack/fixes.py`), the same price whatever the verdict. No payment is taken yet; that comes with the web app.
+
+```bash
+# Every song that can be fixed:
+python -m retrack sample_catalog.csv --mock --ai-search --fix
+
+# Only some songs, filling your own MLC template:
+python -m retrack your_catalog.csv --ai-search --fix-songs "Blue Hour,Ghost Signal" --template mlc_template.xlsx
+```
+
+Retrack shows which songs go in the pack and the price ("4 songs × $5.00 = $20.00"). Then it asks you to confirm that **you reviewed the data and control the shares being registered**. Type `yes`, or pass `--i-confirm` in scripts. No confirmation, no files. Your confirmation and the time are saved in the pack.
+
+The pack goes in `fix_pack/`, with a README explaining each file and how to upload it:
+
+| Song | File | What you do with it |
+|---|---|---|
+| Not found anywhere | `bulk_work_registration.xlsx` (a filled copy of **your** template), or `registration_worksheet.csv` without `--template` | Fill the yellow cells, upload in your MLC Portal: Works Registration → Bulk Registration Tool. |
+| Registered but not linked | `match_suggestions.csv` (to review) and `BulkMatchSuggestions_YYYYMMDD.csv` (The MLC's exact two-column format) | Confirm each match, then use the Portal's Matching Tool, or email the bulk file (unconfirmed rows deleted) for The MLC's Bulk Match Submission. |
+| Partial shares or missing writers | `claim_checklist.md` | Tick through the steps in your MLC Portal. |
+
+`ATTESTATION.txt` holds your confirmation and the time. The disclaimer is in the pack's README and ATTESTATION. Files whose format The MLC dictates get nothing extra: your template copy only gains the filled rows (no extra tabs), and the bulk match file is exactly `ISRC,MLC Song Code`.
+
+**Get the template** from your own MLC Portal (Works Registration → Bulk Registration Tool → download). Retrack never makes its own copy of The MLC's template: it fills in a copy of yours and leaves your original alone.
+
+**Ownership data is never guessed.** Publisher shares, IPIs, role codes and publisher names are left blank and marked "YOU MUST FILL THIS IN". Retrack only pre-fills what it knows from your catalog and The MLC: titles, writer names, artist, ISRC, and the MLC song code when a work already exists (so no duplicate gets created).
+
+Red songs need `--ai-search` to be in the pack. Without it, Retrack can't tell "not registered" from "registered under another title", and registering the second kind again would create a duplicate.
+
+Retrack never logs into The MLC Portal, never asks for your Portal password, and never uploads anything for you.
+
 ## The homepage (upload a CSV, see results)
 
 The easiest way in: a web page where you drop your catalog CSV and the results appear right below it.
@@ -112,6 +144,8 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 | `retrack/checker.py` | The rules that decide red/yellow/green and the fix steps. |
 | `retrack/name_matcher.py` | Second-pass name check: `ClaudeNameMatcher` (Claude API) and `MockNameMatcher` (offline rules). |
 | `retrack/work_search.py` | `--ai-search`: searches by title/writers. `ClaudeWorkSearcher` (Claude API) and `MockWorkSearcher` (offline rules). Only suggests; `checker.py` decides. |
+| `retrack/fixes.py` | The fix pack: plans which songs get which fix, checks the attestation, fills a copy of your MLC template, writes the other files. |
+| `retrack/compliance.py` | The disclaimer, the "never" text and the attestation wording, in one place. |
 | `retrack/report.py` | Prints the summary, writes the CSV and builds the HTML report. |
 | `retrack/report.css` | The HTML report's styles. They're pasted into the HTML file, so it needs nothing else. |
 | `retrack/web.py` | The homepage: upload form, `/check` (runs the check on an uploaded CSV), `/template.csv`. |
@@ -120,7 +154,12 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 | `tests/test_checker.py` | One test per verdict, plus name and ISRC cleanup. |
 | `tests/test_web.py` | The homepage: uploads, errors, results on the same page, refusing other websites. |
 | `tests/test_work_search.py` | `--ai-search`: the song-code search, the search limits, both searchers, and the two red cases. |
+| `tests/test_fixes.py` | The fix pack and the compliance rules: no files without attestation, ownership never guessed, one price for every verdict. |
 | `tests/test_html_report.py` | The HTML report (order, counts, escaping, offline, print) and the preview server. |
+
+## Not affiliated with The MLC
+
+Retrack is not affiliated with or endorsed by The MLC. Data comes from The MLC’s Public Search API and may not reflect actual copyright ownership. You are responsible for reviewing all data before uploading.
 
 ## Getting real API access
 

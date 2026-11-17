@@ -6,6 +6,7 @@ from html import escape
 from pathlib import Path
 
 from .checker import GREEN, RED, RED_CASES, YELLOW
+from .compliance import COMPLIANCE_TEXT
 
 ICONS = {GREEN: "🟢", YELLOW: "🟡", RED: "🔴"}
 ORDER = {RED: 0, YELLOW: 1, GREEN: 2}
@@ -287,6 +288,7 @@ def render_html(results, catalog_name="", mock=False, checked_on=None):
     <ul>{manual}</ul>
     <p class="small">Retrack only reads registration data from The MLC’s Public Search API.
     It never touches your audio and never trains on your catalog.</p>
+    <p class="small compliance">{escape(COMPLIANCE_TEXT)}</p>
   </div>
 </footer>
 </body>
