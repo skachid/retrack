@@ -132,13 +132,13 @@ python -m retrack.web          # the real thing (needs MLC_USERNAME / MLC_PASSWO
 Your browser opens **http://localhost:8000**, and you go through five steps:
 
 1. **Upload.** Drop in your spreadsheet as it is: a `.csv` or `.xlsx` with any columns (a distributor export, or your own sheet).
-2. **Columns.** Retrack shows which column it read as the title, artist, ISRC and writers, how sure it is, and your first 5 rows. Fix anything it got wrong. Here you can also turn on the two extra checks. Both are **off by default**, and each says in one sentence what it sends to Claude:
-   - **Smart names**: asks Claude whether two writer names are the same person.
+2. **Columns.** Retrack shows which column it read as the title, artist, ISRC and writers (several writer columns are fine), how sure it is, and your first 5 rows. Fix anything it got wrong with the dropdowns.
+3. **Check.** Choose the two optional extra checks. Both are **off by default**, and each says in one sentence what it sends to an AI service (Claude):
+   - **Smart names**: asks whether two writer names are the same person.
    - **AI search**: looks for songs that are registered but not linked to your ISRC.
-   Below them, "What will leave this computer" updates as you switch them on and off.
-3. **Check.** "Checking 37 of 120…", updating by itself.
-4. **Report.** The red/yellow/green report, with any notes from reading your file. Download it as HTML or print it.
-5. **Fix pack.** Tick the songs to fix, see "N songs × $X", confirm that you reviewed the data and control the shares, and download the fix pack as a `.zip`. Without the confirmation, no files are made.
+   Below them, "What will leave this computer" updates as you switch them on and off. Then press **Start the check** and watch "Checking 37 of 120…", which updates by itself.
+4. **Report.** The red/yellow/green report. **Summary** groups what Retrack found ("1 song is only partly claimed: Paper Crowns"); the other filters show one colour. There are also notes from reading your file. Download it as HTML or print it.
+5. **Fix pack.** Tick the songs to fix, see "N songs × $X", confirm that you reviewed the data and control the shares, and download the fix pack as a `.zip`. Without the confirmation, no files are made. Red songs that need AI search before Retrack can tell whether to register or link them are listed together above the list, with a checkbox and a button that checks just those songs again.
 
 Every error says what went wrong and what to do next: the wrong kind of file, no ISRC column, The MLC turning down the login or not answering, or Claude not being set up.
 

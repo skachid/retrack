@@ -5,7 +5,8 @@ import datetime
 from html import escape
 from pathlib import Path
 
-from .checker import GREEN, RED, RED_CASES, YELLOW
+from .checker import (GREEN, MISSING_WRITERS, MULTIPLE_WORKS, NO_PUBLISHER, NOT_FOUND, NOT_LINKED,
+                      OVERCLAIM, PARTIAL_SHARE, RED, RED_CASES, SECOND_REGISTRATION, YELLOW)
 from .compliance import COMPLIANCE_TEXT
 
 ICONS = {GREEN: "🟢", YELLOW: "🟡", RED: "🔴"}
@@ -199,6 +200,61 @@ def _song_card(r, expanded=True):
         {body}
       </div>
     </details>"""
+
+
+# ---- Summary of findings ---------------------------------------------------------
+#
+# Counts what the checker found, grouped by kind. No rules here: red songs are
+# grouped by their red_case, yellow ones by the finding codes checker.py
+# recorded as each rule fired.
+
+UNCHECKED_RED, ALL_SET = "UNCHECKED_RED", "ALL_SET"
+SUMMARY_LINES = [
+    # (status, key, one song..., several songs...)
+    (RED, NOT_FOUND, "isn’t registered anywhere at The MLC", "aren’t registered anywhere at The MLC"),
+    (RED, NOT_LINKED, "is registered but not linked to your recording",
+     "are registered but not linked to your recordings"),
+    (RED, UNCHECKED_RED, "has no match for its ISRC yet", "have no match for their ISRCs yet"),
+    (YELLOW, NO_PUBLISHER, "has nobody collecting on it", "have nobody collecting on them"),
+    (YELLOW, PARTIAL_SHARE, "is only partly claimed", "are only partly claimed"),
+    (YELLOW, OVERCLAIM, "is claimed more than 100%", "are claimed more than 100%"),
+    (YELLOW, MISSING_WRITERS, "is missing writers on its MLC record", "are missing writers on their MLC records"),
+    (YELLOW, MULTIPLE_WORKS, "is linked to more than one work", "are linked to more than one work"),
+    (YELLOW, SECOND_REGISTRATION, "may have a second registration to merge",
+     "may have second registrations to merge"),
+    (GREEN, ALL_SET, "is all set", "are all set"),
+]
+
+
+def finding_keys(result):
+    if result.status == RED:
+        return [result.red_case or UNCHECKED_RED]
+    if result.status == GREEN:
+        return [ALL_SET]
+    return result.findings
+
+
+def findings_summary(results):
+    """[(status, sentence, titles)] in order of urgency, one line per kind of finding.
+
+    A song with two problems (say, nobody collecting and a missing writer) is
+    counted on both lines, because each needs its own fix.
+    """
+    lines = []
+    for status, key, one, several in SUMMARY_LINES:
+        titles = [r.row.title for r in results if key in finding_keys(r)]
+        if titles:
+            n = len(titles)
+            lines.append((status, f"{_plural(n, 'song')} {one if n == 1 else several}", titles))
+    return lines
+
+
+def findings_html(results):
+    rows = "".join(
+        f'<div class="is-{GROUPS[status][0]}"><dt>{GROUPS[status][2]}</dt>'
+        f'<dd>{escape(sentence)}: <span class="titles">{escape(", ".join(titles))}</span></dd></div>'
+        for status, sentence, titles in findings_summary(results))
+    return f'<dl class="findings">{rows}</dl>'
 
 
 def summary_html(results, mock=False):

@@ -84,6 +84,10 @@
       results.querySelectorAll(".group[data-status]").forEach(function (g) {
         g.hidden = status !== "all" && g.dataset.status !== status;
       });
+      // "Summary" shows the summary of findings above every song; a colour shows just its songs.
+      results.querySelectorAll("[data-summary]").forEach(function (panel) {
+        panel.hidden = status !== "all";
+      });
     };
     var toggleAll = function (button) {
       var open = button.textContent === "Open all";

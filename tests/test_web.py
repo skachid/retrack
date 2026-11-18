@@ -115,9 +115,17 @@ def upload_ok(srv, filename="catalog.csv", data=SAMPLE):
 SAMPLE_MAPPING = [("map_title", "0"), ("map_artist", "1"), ("map_isrc", "2"), ("map_writers", "3")]
 
 
+def columns(srv, sid, mapping=SAMPLE_MAPPING):
+    return call(srv, f"/s/{sid}/columns", *form(mapping))
+
+
 def scan(srv, sid, mapping=SAMPLE_MAPPING, smart_names=False, ai_search=False):
-    pairs = list(mapping) + ([("smart_names", "on")] if smart_names else []) + \
-        ([("ai_search", "on")] if ai_search else [])
+    """Confirm the columns, then start the check with these extra checks."""
+    status, headers, body = columns(srv, sid, mapping)
+    if status != 303:
+        return status, headers, body
+    assert headers["Location"].endswith("/check")
+    pairs = ([("smart_names", "on")] if smart_names else []) + ([("ai_search", "on")] if ai_search else [])
     return call(srv, f"/s/{sid}/scan", *form(pairs))
 
 
@@ -156,9 +164,16 @@ def test_full_flow_upload_columns_scan_report_fix_pack_download(server):
     assert status == 200
     assert '<option value="1" selected>B: Song Name</option>' in page
     assert '<option value="3" selected>D: ISRC code</option>' in page
-    assert 'name="map_writers" value="4" checked' in page
-    assert 'id="smart_names" name="smart_names" value="on">' in page  # off by default
-    assert 'id="ai_search" name="ai_search" value="on">' in page
+    assert '<option value="4" selected>E: Composer(s)</option>' in page  # writers: a dropdown too
+    assert 'id="smart_names"' not in page  # the extra checks live on the Check step
+
+    # 2b. the Check step: both extra checks off by default
+    status, headers, _ = columns(server, sid, [("map_title", "1"), ("map_artist", "2"), ("map_isrc", "3"),
+                                               ("map_writers", "4")])
+    assert status == 303 and headers["Location"].endswith("/check")
+    _, page = text(server, f"/s/{sid}/check")
+    assert '<input type="checkbox" id="smart_names" name="smart_names" value="on">' in page
+    assert '<input type="checkbox" id="ai_search" name="ai_search" value="on">' in page
 
     # 3. scan with AI search on
     status, headers, _ = scan(server, sid, [("map_title", "1"), ("map_artist", "2"), ("map_isrc", "3"),
@@ -249,7 +264,7 @@ def test_price_on_the_page_comes_from_price_line(server):
 def test_progress_text_and_page_work_without_javascript(tmp_path):
     store = SessionStore(tmp_path / "s")
     s = store.create("c.csv", SAMPLE)
-    s.rows, s.done, s.state = [object()] * 120, 36, "running"
+    s.rows, s.todo, s.done, s.state = [object()] * 120, list(range(120)), 36, "running"
     assert pages.progress_text(s) == "Checking 37 of 120…"
     page = pages.progress_page(s)
     assert "Checking 37 of 120…" in page
@@ -316,21 +331,21 @@ def test_too_big_is_refused(server, monkeypatch):
 
 def test_no_isrc_column_chosen(server):
     sid = upload_ok(server)
-    status, _, body = scan(server, sid, [("map_title", "0"), ("map_isrc", "")])
+    status, _, body = columns(server, sid, [("map_title", "0"), ("map_isrc", "")])
     assert status == 400
     assert "Pick the missing columns" in body.decode() and "ISRC" in body.decode()
 
 
 def test_no_valid_isrcs(server):
     sid = upload_ok(server)
-    status, _, body = scan(server, sid, [("map_title", "0"), ("map_isrc", "1")])  # artist column as ISRC
+    status, _, body = columns(server, sid, [("map_title", "0"), ("map_isrc", "1")])  # artist column as ISRC
     assert status == 400 and "No songs with a valid ISRC" in body.decode()
 
 
 def test_too_many_songs(server, monkeypatch):
     monkeypatch.setattr(web, "MAX_SONGS", 2)
     sid = upload_ok(server)
-    status, _, body = scan(server, sid)
+    status, _, body = columns(server, sid)
     assert status == 400 and "Retrack checks up to 2 at a time" in body.decode()
 
 
@@ -358,7 +373,7 @@ def test_mlc_problems_are_explained(tmp_path, client, expected):
         status, page = text(srv, f"/s/{sid}/progress")
         assert status == 502 and expected in page
         assert "Your file is fine" in page or "Nothing is wrong with your file" in page
-        assert "Back to the columns" in page
+        assert "Back to the checks" in page
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
@@ -371,7 +386,7 @@ def test_claude_not_set_up_is_explained_before_scanning(tmp_path):
     try:
         sid = upload_ok(srv)
         status, _, body = scan(srv, sid, smart_names=True)
-        assert status == 503 and "Claude isn’t set up on this computer" in body.decode()
+        assert status == 503 and "The AI checks aren’t set up on this computer" in body.decode()
         assert scan(srv, sid)[0] == 303  # with both checks off it goes ahead
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
@@ -388,7 +403,7 @@ def test_claude_unavailable_during_scan_is_reported(tmp_path):
         scan(srv, sid, smart_names=True, ai_search=True)
         assert wait_done(srv, sid)["state"] == "done"  # the check still finishes
         _, page = text(srv, f"/s/{sid}/results")
-        assert "Claude didn’t answer for" in page and "Nothing is wrong with your file" in page
+        assert "The AI service didn’t answer for" in page and "Nothing is wrong with your file" in page
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
@@ -406,6 +421,13 @@ def test_nothing_uploaded_yet_shows_the_upload(server):
     assert 'action="/upload"' in page and 'accept=".csv,.xlsx' in page
     for song in ("Ghost Signal", "Late Night Drive"):
         assert song not in page
+
+
+def test_colour_note_lists_each_colour_with_its_meaning_in_words():
+    page = pages.home_page()
+    assert '<div class="is-red"><dt>Red</dt><dd>Money is probably stuck</dd></div>' in page
+    assert '<div class="is-yellow"><dt>Yellow</dt><dd>Registered, but something is off</dd></div>' in page
+    assert '<div class="is-green"><dt>Green</dt><dd>Registered and fully claimed</dd></div>' in page
 
 
 def test_zero_problems_says_nothing_to_fix(tmp_path):
@@ -546,6 +568,7 @@ def test_sample_data_banner_on_every_page_in_mock_mode(server):
     pages_seen = [
         text(server, "/")[1],
         text(server, f"/s/{sid}/columns")[1],
+        text(server, f"/s/{sid}/check")[1],
         results,
         text(server, f"/s/{sid}/fix", data=form([("song", i) for i in ids])[0],
              content_type="application/x-www-form-urlencoded")[1],
@@ -556,21 +579,22 @@ def test_sample_data_banner_on_every_page_in_mock_mode(server):
         assert BANNER in page
     store = SessionStore(server.sessions.root.parent / "other")
     s = store.create("c.csv", SAMPLE)
-    s.rows, s.state = [object()] * 3, "running"
+    s.rows, s.todo, s.state = [object()] * 3, [0, 1, 2], "running"
     assert BANNER in pages.progress_page(s, mock=True)
     assert BANNER not in pages.home_page(mock=False)
 
 
 def test_both_toggles_are_off_by_default_with_one_sentence_each(server):
     sid = upload_ok(server)
-    _, page = text(server, f"/s/{sid}/columns")
+    columns(server, sid)
+    _, page = text(server, f"/s/{sid}/check")
     import html
     assert '<input type="checkbox" id="smart_names" name="smart_names" value="on">' in page  # not checked
     assert '<input type="checkbox" id="ai_search" name="ai_search" value="on">' in page
     shown = html.unescape(page)
     for sentence in (pages.SMART_NAMES_TEXT, pages.AI_SEARCH_TEXT):
         assert sentence in shown
-        assert sentence.count(".") == 1 and "Claude" in sentence  # one plain sentence, naming Claude
+        assert sentence.count(".") == 1 and "an AI service" in sentence  # one plain sentence, generic "AI"
 
 
 # ---- Privacy text matches exactly what a scan sends --------------------------------------------
@@ -645,14 +669,15 @@ def test_privacy_text_matches_what_a_scan_actually_sends(tmp_path, smart_names, 
     shown = html.unescape(results)
     for heading, sentence in privacy_items(smart_names, ai_search):
         assert heading in shown and sentence in shown
-    claude_line = next(h for h, _ in privacy_items(smart_names, ai_search) if "Claude" in h)
+    claude_line = next(h for h, _ in privacy_items(smart_names, ai_search) if "AI service" in h)
     for kind in (ISRCS, SONG_CODES, TITLES, WRITER_NAMES):
         assert (kind in claude_line) == (kind in declared.claude)
 
 
-def test_columns_page_shows_the_privacy_text_for_each_toggle_setting(server):
+def test_check_page_shows_the_privacy_text_for_each_toggle_setting(server):
     sid = upload_ok(server)
-    _, page = text(server, f"/s/{sid}/columns")
+    columns(server, sid)
+    _, page = text(server, f"/s/{sid}/check")
     import html, re
     for sn in (False, True):
         for ai in (False, True):
@@ -674,14 +699,14 @@ def test_mock_mode_sends_nothing_and_says_so(tmp_path, monkeypatch):
     assert data_flows(True, True, mock=True).mlc == frozenset()
     assert data_flows(True, True, mock=True).claude == frozenset()
     assert "Nothing goes to The MLC." in privacy_text(True, True, mock=True)
-    assert "Nothing goes to Claude." in privacy_text(True, True, mock=True)
+    assert "Nothing goes to an AI service." in privacy_text(True, True, mock=True)
     srv = start(tmp_path)  # mock=True: the mock matchers are used, never Claude's
     try:
         sid = upload_ok(srv)
         scan(srv, sid, smart_names=True, ai_search=True)  # both checks on, still nothing real runs
         assert wait_done(srv, sid)["state"] == "done"
         _, page = text(srv, f"/s/{sid}/results")
-        assert "Nothing goes to Claude." in page and "Nothing goes to The MLC." in page
+        assert "Nothing goes to an AI service." in page and "Nothing goes to The MLC." in page
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
@@ -691,3 +716,85 @@ def test_without_mlc_login_it_explains_and_exits(monkeypatch, capsys):
     monkeypatch.delenv("MLC_PASSWORD", raising=False)
     assert web.main([], open_browser=None) == 1
     assert "--mock" in capsys.readouterr().err
+
+
+# ---- Polish round: AI wording, steps, summary, re-check, consistent dropdowns ------------------
+
+def test_pages_say_ai_not_claude(server):
+    sid = scanned(server)
+    for path in ("/", f"/s/{sid}/columns", f"/s/{sid}/check", f"/s/{sid}/results"):
+        assert "Claude" not in text(server, path)[1], path
+
+
+def test_writers_use_dropdowns_like_the_other_fields(server):
+    tunecore = (ROOT / "fixtures" / "import" / "tunecore_export.xlsx").read_bytes()
+    sid = upload_ok(server, "tunecore_export.xlsx", tunecore)
+    _, page = text(server, f"/s/{sid}/columns")
+    assert 'type="checkbox"' not in page.split('<fieldset class="mapping">')[1].split("</fieldset>")[0]
+    # one dropdown per writer column found (Songwriter 1 and 2), plus an empty one to add another
+    assert page.count('name="map_writers"') == 3
+    assert '<option value="7" selected>H: Songwriter 1</option>' in page
+    assert '<option value="8" selected>I: Songwriter 2</option>' in page
+    assert '<option value="">(add another column)</option>' in page
+    # an empty dropdown is ignored; two picked columns both count
+    columns(server, sid, [("map_title", "3"), ("map_isrc", "5"), ("map_writers", "7"),
+                          ("map_writers", "8"), ("map_writers", "")])
+    assert server.sessions.get(sid).mapping["writers"].columns == [7, 8]
+
+
+def test_summary_filter_shows_a_summary_of_findings(server):
+    sid = scanned(server, ai_search=True)
+    _, page = text(server, f"/s/{sid}/results")
+    assert '<button type="button" class="chip" data-filter="all" aria-pressed="true">Summary</button>' in page
+    assert ">All <" not in page
+    panel = page.split('<section class="findings-panel" data-summary')[1].split("</section>")[0]
+    assert '<dt>Red</dt><dd>1 song isn’t registered anywhere at The MLC: <span class="titles">Ghost Signal</span>' in panel
+    assert "1 song is registered but not linked to your recording" in panel
+    assert "1 song is only partly claimed" in panel and "Paper Crowns" in panel
+    assert '<dt>Green</dt><dd>1 song is all set' in panel
+
+
+def test_songs_needing_ai_search_get_a_callout_with_the_checkbox(server):
+    sid = scanned(server)  # AI search off: the two red songs can't be placed yet
+    _, page = text(server, f"/s/{sid}/results")
+    box = page.split('<div class="needs-search"')[1].split("</form>")[0]
+    assert "2 songs need AI search first" in box
+    assert "Ghost Signal" in box and "Blue Hour" in box
+    assert 'name="ai_search" value="on" required' in box  # ticking it is the OK to send data
+    assert "an AI service" in box and "Check these 2 songs again" in box
+    assert page.index('class="needs-search"') < page.index('id="fix-form"')  # seen before the list
+
+
+def test_recheck_without_the_box_ticked_sends_nothing(server):
+    sid = scanned(server)
+    status, page = text(server, f"/s/{sid}/recheck", data=b"", content_type="application/x-www-form-urlencoded")
+    assert status == 400 and "Tick AI search first" in page
+    assert server.sessions.get(sid).settings["ai_search"] is False
+
+
+def test_recheck_checks_only_the_red_songs_with_ai_search(tmp_path):
+    checked = []
+
+    class Counting(MockClient):
+        def search_recordings(self, isrc):
+            checked.append(isrc)
+            return super().search_recordings(isrc)
+
+    # real mode (not sample data), with offline stand-ins for the AI, so the privacy text is the real one
+    srv = start(tmp_path, Counting, mock=False, make_name_matcher=MockNameMatcher,
+                make_work_searcher=MockWorkSearcher)
+    try:
+        sid = scanned(srv)
+        assert len(checked) == 5
+        status, headers, _ = call(srv, f"/s/{sid}/recheck", *form([("ai_search", "on")]))
+        assert status == 303 and headers["Location"].endswith("/progress")
+        assert wait_done(srv, sid)["state"] == "done"
+        assert sorted(checked[5:]) == ["QZABC2400004", "QZABC2400005"]  # just the two red songs
+        s = srv.sessions.get(sid)
+        assert s.settings["ai_search"] is True  # so "what left this computer" now says so
+        _, page = text(srv, f"/s/{sid}/results")
+        assert 'class="needs-search"' not in page  # both songs can now be fixed
+        assert len(fixable_ids(page)) == 4
+        assert "song titles and writer names" in page  # the privacy panel follows the new setting
+    finally:
+        srv.shutdown(); srv.server_close(); srv.sessions.delete_all()

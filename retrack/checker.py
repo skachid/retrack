@@ -38,6 +38,11 @@ RED_CASES = {
     NOT_FOUND: "Not found anywhere",
 }
 
+# Short codes for the problems on yellow songs, recorded as each rule fires, so a
+# summary can count them (report.findings_summary) without repeating the rules.
+MULTIPLE_WORKS, NO_PUBLISHER, PARTIAL_SHARE, OVERCLAIM, MISSING_WRITERS, SECOND_REGISTRATION = (
+    "MULTIPLE_WORKS", "NO_PUBLISHER", "PARTIAL_SHARE", "OVERCLAIM", "MISSING_WRITERS", "SECOND_REGISTRATION")
+
 # A work-search suggestion (see work_search.py) only counts if the searcher says
 # "same song" and is at least this sure. Set higher than for names: a wrong match
 # here could send someone to claim a song that isn't theirs.
@@ -64,6 +69,7 @@ class Result:
     fixes: list = field(default_factory=list)
     notes: list = field(default_factory=list)  # FYI only, doesn't change the status
     missing_writers: list = field(default_factory=list)
+    findings: list = field(default_factory=list)  # codes like PARTIAL_SHARE, one per problem found
     red_case: str = ""  # NOT_LINKED, NOT_FOUND, or "" (not searched / search incomplete)
     suggested_match: object = None  # a work_search.Candidate the user must confirm
     other_matches: list = field(default_factory=list)  # more Candidates that also passed the bar
@@ -214,15 +220,19 @@ def check_by_isrc(row, client, name_matcher=None):
     )
     if len(works) > 1:
         result.problems.append(f"This ISRC is linked to {len(works)} works; only the first was checked.")
+        result.findings.append(MULTIPLE_WORKS)
 
     if not work.get("publishers"):
         result.problems.append("No publisher or administrator is collecting on this song.")
+        result.findings.append(NO_PUBLISHER)
         result.fixes.append("Claim your share in The MLC Portal (self-published writers can claim directly).")
     elif result.claimed_share < 100:
         result.problems.append(f"Only {result.claimed_share:g}% of the song is claimed.")
+        result.findings.append(PARTIAL_SHARE)
         result.fixes.append("Find which co-writer's share is unclaimed and get it claimed in The MLC Portal.")
     elif result.claimed_share > 100:
         result.problems.append(f"Shares add up to {result.claimed_share:g}%, which means there's a dispute or overclaim.")
+        result.findings.append(OVERCLAIM)
         result.fixes.append("Check The MLC Portal for a share conflict on this song.")
 
     missing = []
@@ -235,6 +245,7 @@ def check_by_isrc(row, client, name_matcher=None):
     result.missing_writers = missing
     if missing:
         result.problems.append(f"Writers not found on the MLC record: {', '.join(missing)}.")
+        result.findings.append(MISSING_WRITERS)
         result.fixes.append(
             "Check whether these writers are registered under a different name, or add them to the work."
         )
@@ -320,6 +331,7 @@ def apply_missing_writer_search(result, client, work_searcher):
     best = matches[0]
     result.suggested_match = best
     result.other_matches = matches[1:]
+    result.findings.append(SECOND_REGISTRATION)
     result.fixes.append(f"Please confirm whether {describe(best)} is a second registration of this "
                         "song. If it is, ask The MLC to merge the two so all writers are on one record.")
 

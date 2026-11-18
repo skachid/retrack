@@ -6,8 +6,11 @@
 The flow, one page per step (pages are built in web_pages.py):
   GET  /                        upload a spreadsheet (.csv or .xlsx, any columns)
   POST /upload                  saves it in a private session folder, reads it
-  GET  /s/<id>/columns          confirm the column mapping, choose the extra checks
-  POST /s/<id>/scan             converts the rows and starts the check in the background
+  GET  /s/<id>/columns          confirm the column mapping
+  POST /s/<id>/columns          converts the rows with that mapping
+  GET  /s/<id>/check            choose the extra checks (smart names, AI search)
+  POST /s/<id>/scan             starts the check in the background
+  POST /s/<id>/recheck          checks red songs again with AI search (only those)
   GET  /s/<id>/progress         "Checking 37 of 120…" (refreshes itself)
   GET  /s/<id>/status           the same, as JSON, for the page's script
   GET  /s/<id>/results          the report, with songs to tick for the fix pack
@@ -46,7 +49,7 @@ from urllib.parse import parse_qs, urlsplit
 import requests
 
 from . import web_pages as pages
-from .checker import check_row, load_catalog
+from .checker import RED, check_row, load_catalog
 from .fixes import FixPackError, build_fix_pack, check_template, confirm, fix_kind, plan_fixes
 from .importer import (FIELDS, REQUIRED, CatalogImportError, FieldMap, HeaderRuleMapper, clean_mapping,
                        convert, read_table, sample_rows, write_catalog, write_problems)
@@ -61,7 +64,7 @@ MAX_UPLOAD_BYTES = 5_000_000  # a big .xlsx catalog is well under this
 MAX_FORM_BYTES = 200_000      # the non-file forms (columns, ticked songs)
 MAX_SONGS = 500               # each song is at least 2 API calls, so keep one check to minutes
 TEMPLATE_CSV = "title,artist,isrc,writers\r\n"
-SESSION_PATH = re.compile(r"^/s/([A-Za-z0-9_-]{22})/(columns|scan|progress|status|results|fix|fix/download|"
+SESSION_PATH = re.compile(r"^/s/([A-Za-z0-9_-]{22})/(columns|check|scan|recheck|progress|status|results|fix|fix/download|"
                           r"delete|report\.html|import_problems\.csv)$")
 
 
@@ -155,21 +158,25 @@ MLC_LOGIN_FAILED = ("Retrack couldn’t log in to The MLC",
                     ".env file, then stop Retrack (Ctrl+C) and start it again. Your file is fine.")
 MLC_DOWN = ("The MLC didn’t answer",
             "Nothing is wrong with your file. The MLC’s service may be busy or down. "
-            "Wait a few minutes, then press Check my songs again.")
-CLAUDE_MISSING = ("Claude isn’t set up on this computer",
-                  "Smart names and AI search use the Claude API, which needs ANTHROPIC_API_KEY and "
-                  "the anthropic package. Turn both checks off to go on without them, or set them up "
-                  "and restart Retrack.")
+            "Wait a few minutes, then press Start the check again.")
+AI_MISSING = ("The AI checks aren’t set up on this computer",
+              "Smart names and AI search need an API key for the AI service (ANTHROPIC_API_KEY, see "
+              "the README). Turn both checks off to go on without them, or set the key and restart Retrack.")
+NO_AI_CONSENT = ("Tick AI search first",
+                 "These songs can only be placed with AI search, which sends their titles and writer names "
+                 "out of this computer. Tick the box to allow it, then press the button again.")
 
 
 def run_scan(session, make_client, name_matcher, work_searcher):
-    """Check every row, updating session.done as it goes. Runs in its own thread."""
+    """Check the rows listed in session.todo, updating session.done as it goes.
+    Runs in its own thread. A first check lists every row; a re-check lists only
+    the songs being checked again, and their old results are replaced."""
     try:
         client = make_client()
-        for row in session.rows:
+        for i in session.todo:
             if session.cancelled:  # "Delete my files now" was pressed
                 return
-            session.results.append(check_row(row, client, name_matcher, work_searcher))
+            session.results[i] = check_row(session.rows[i], client, name_matcher, work_searcher)
             session.done += 1
         session.state = "done"
     except MLCAuthError:
@@ -178,7 +185,7 @@ def run_scan(session, make_client, name_matcher, work_searcher):
         session.fail(*MLC_DOWN)
     except Exception as e:  # a bug: say so plainly instead of hanging on "Checking…"
         session.fail("Something went wrong inside Retrack",
-                     f"Your file is fine. Press Check my songs to try again; if it happens again, "
+                     f"Your file is fine. Press Start the check to try again; if it happens again, "
                      f"restart Retrack. ({type(e).__name__})")
 
 
@@ -309,11 +316,10 @@ def make_handler(config):
         def get_columns(self, session):
             self._send(200, pages.columns_page(session, mock))
 
-        def post_scan(self, session):
+        def post_columns(self, session):
             if session.state == "running":
                 return self._redirect(f"/s/{session.id}/progress")
             form = self._form()
-            session.settings = {"smart_names": "smart_names" in form, "ai_search": "ai_search" in form}
             n = len(session.table.headers)
             chosen = {}
             for f in FIELDS:
@@ -328,7 +334,7 @@ def make_handler(config):
                 return self._send(400, pages.columns_page(session, mock, error=(
                     "Pick the missing columns",
                     f"Retrack needs a column for {' and '.join(missing)} to check your songs. "
-                    "Choose it from the list, then press Check my songs.")))
+                    "Choose it from the list, then press Next.")))
 
             # Same path as the command line: convert, save catalog.csv, read it back with
             # load_catalog. So the web UI checks exactly what `python -m retrack` would.
@@ -346,36 +352,79 @@ def make_handler(config):
                     "That’s a lot of songs at once",
                     f"Your file has {len(rows)} songs; Retrack checks up to {MAX_SONGS} at a time. "
                     "Split the spreadsheet into parts and upload each one.")))
+            session.rows, session.results, session.state = rows, [], "ready"
+            self._redirect(f"/s/{session.id}/check")
 
-            try:
-                name_matcher = (WatchedNameMatcher(config.make_name_matcher(), session)
-                                if session.settings["smart_names"] else None)
-                work_searcher = (WatchedWorkSearcher(config.make_work_searcher(), session)
-                                 if session.settings["ai_search"] else None)
-            except Exception:  # no anthropic package, no API key...
-                return self._send(503, pages.columns_page(session, mock, error=CLAUDE_MISSING))
+        # -- 3. check --
+        def _checkers(self, session):
+            """The extra checks the settings ask for. Raises if the AI service isn't set up."""
+            name_matcher = (WatchedNameMatcher(config.make_name_matcher(), session)
+                            if session.settings["smart_names"] else None)
+            work_searcher = (WatchedWorkSearcher(config.make_work_searcher(), session)
+                             if session.settings["ai_search"] else None)
+            return name_matcher, work_searcher
 
-            session.rows, session.results, session.done = rows, [], 0
+        def _start(self, session, todo, name_matcher, work_searcher):
+            session.todo, session.done = todo, 0
             session.error, session.claude_failures, session.state = None, 0, "running"
             threading.Thread(target=run_scan, daemon=True,
                              args=(session, config.make_client, name_matcher, work_searcher)).start()
             self._redirect(f"/s/{session.id}/progress")
 
-        # -- 3. check --
+        def get_check(self, session):
+            if session.state == "columns":
+                return self._redirect(f"/s/{session.id}/columns")
+            if session.state == "running":
+                return self._redirect(f"/s/{session.id}/progress")
+            self._send(200, pages.check_page(session, mock))
+
+        def post_scan(self, session):
+            if session.state == "running":
+                return self._redirect(f"/s/{session.id}/progress")
+            if session.state == "columns":
+                return self._redirect(f"/s/{session.id}/columns")
+            form = self._form()
+            session.settings = {"smart_names": "smart_names" in form, "ai_search": "ai_search" in form}
+            try:
+                name_matcher, work_searcher = self._checkers(session)
+            except Exception:  # no anthropic package, no API key...
+                return self._send(503, pages.check_page(session, mock, error=AI_MISSING))
+            session.results = [None] * len(session.rows)
+            self._start(session, list(range(len(session.rows))), name_matcher, work_searcher)
+
+        def post_recheck(self, session):
+            """Check the red songs that need AI search again, with AI search on. Only those."""
+            if session.state != "done":
+                return self._redirect(f"/s/{session.id}/progress")
+            form = self._form()
+            if "ai_search" not in form:  # the box is the user's OK to send titles and writer names
+                return self._send(400, pages.results_page(session, mock, recheck_error=NO_AI_CONSENT))
+            todo = [i for i, r in enumerate(session.results) if r.status == RED and not fix_kind(r)]
+            if not todo:
+                return self._redirect(f"/s/{session.id}/results")
+            session.settings = dict(session.settings, ai_search=True)
+            try:
+                name_matcher, work_searcher = self._checkers(session)
+            except Exception:
+                session.settings = dict(session.settings, ai_search=False)
+                return self._send(503, pages.results_page(session, mock, recheck_error=AI_MISSING))
+            self._start(session, todo, name_matcher, work_searcher)
+
         def get_progress(self, session):
             if session.state == "done":
                 return self._redirect(f"/s/{session.id}/results")
             if session.state == "failed":
                 title, message = session.error
-                retry = (f'<a class="btn" href="/s/{session.id}/columns">Back to the columns</a>'
+                retry = (f'<a class="btn" href="/s/{session.id}/check">Back to the checks</a>'
                          '<a href="/">Upload a different file</a>')
                 return self._send(502, pages.error_page(title, message, mock, step="check", action=retry))
-            if session.state == "columns":
-                return self._redirect(f"/s/{session.id}/columns")
+            if session.state in ("columns", "ready"):
+                return self._redirect(f"/s/{session.id}/{'columns' if session.state == 'columns' else 'check'}")
             self._send(200, pages.progress_page(session, mock))
 
         def get_status(self, session):
-            nxt = {"done": "results", "failed": "progress", "columns": "columns"}.get(session.state, "progress")
+            nxt = {"done": "results", "failed": "progress", "columns": "columns",
+                   "ready": "check"}.get(session.state, "progress")
             self._send(200, json.dumps({"state": session.state, "done": session.done, "total": session.total,
                                         "text": pages.progress_text(session), "next": f"/s/{session.id}/{nxt}"}),
                        "application/json")

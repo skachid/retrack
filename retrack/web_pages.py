@@ -23,7 +23,7 @@ from .compliance import ATTESTATION_TEXT, COMPLIANCE_TEXT, NEVER_TEXT
 from .fixes import CLAIM, FIX_PRICE_USD, LINK, REGISTER, TEMPLATE_HELP, fix_kind, price_line
 from .importer import FIELDS, LOW_CONFIDENCE, REQUIRED, SAMPLE_ROWS, column_letter
 from .privacy import privacy_items
-from .report import CSS_PATH, GROUPS, MANUAL_CHECKS, date_text, groups_html, summary_html
+from .report import CSS_PATH, GROUPS, MANUAL_CHECKS, date_text, findings_html, groups_html, summary_html
 
 HERE = Path(__file__).parent
 
@@ -35,14 +35,13 @@ KIND_TEXT = {
     LINK: "Link it: a match file to link your recording to the song",
     CLAIM: "Claim it: a checklist of steps in The MLC Portal",
 }
+# The page says "an AI service", not the provider's name: users need to know it's an
+# outside AI and exactly what it gets (privacy.py), not which one.
 SMART_NAMES_TEXT = ("When a writer’s name doesn’t match exactly, Retrack sends the two writer "
-                    "names to Claude to ask if they’re the same person.")
+                    "names to an AI service to ask if they’re the same person.")
 AI_SEARCH_TEXT = ("For red songs and songs with missing writers, Retrack sends the song title and "
-                  "writer names to The MLC’s song search and to Claude, to find registrations "
+                  "writer names to The MLC’s song search and to an AI service, to find registrations "
                   "that aren’t linked to your ISRC.")
-# A red song checked without AI search: fix_kind() can't tell "register" from "link".
-UNSPLIT_RED_TEXT = ("Turn on AI search and check again, so Retrack can tell whether the song needs "
-                    "registering or is already registered (registering it twice creates a duplicate).")
 MOCK_TOGGLE_TEXT = " In sample data mode an offline stand-in answers instead, so nothing is sent."
 
 
@@ -144,7 +143,10 @@ def privacy_panel(session, mock):
 def home_page(mock=False, error=None, notice=""):
     error_html = alert(*error) if error else ""
     notice_html = f'<p class="notice-ok" role="status">{escape(notice)}</p>' if notice else ""
-    colours = " ".join(f"{verdict}: {meaning.lower()}." for _, _, verdict, meaning in GROUPS.values())
+    # One row per colour: the word set in its colour, the meaning beside it in words,
+    # so the colour is never the only signal.
+    colours = "".join(f'<div class="is-{cls}"><dt>{verdict}</dt><dd>{escape(meaning)}</dd></div>'
+                      for cls, _, verdict, meaning in GROUPS.values())
     body = f"""
   <section class="hero" aria-labelledby="hero-title">
     <div class="container">
@@ -193,7 +195,7 @@ def home_page(mock=False, error=None, notice=""):
           </tbody>
         </table>
       </div>
-      <p class="footnote">{escape(colours)}</p>
+      <dl class="footnote" aria-label="What each colour means">{colours}</dl>
     </div>
   </section>
 
@@ -213,6 +215,12 @@ def _option_label(i, header):
     return f"{column_letter(i)}: {header.strip() or '(no header)'}"
 
 
+def _options(headers, selected, none_label="(none)"):
+    return f'<option value="">{none_label}</option>' + "".join(
+        f'<option value="{i}"{" selected" if i == selected else ""}>{escape(_option_label(i, h))}</option>'
+        for i, h in enumerate(headers))
+
+
 def _sure_text(field, fm):
     if not fm.columns:
         return "Not found. Pick the column." if field in REQUIRED else "Not found. Optional."
@@ -229,30 +237,26 @@ def columns_page(session, mock=False, error=None):
         fm = mapping[field]
         sure = f'<p class="sure" id="sure-{field}">{escape(_sure_text(field, fm))}</p>'
         if field == "writers":
-            checks = "".join(
-                f'<label class="check"><input type="checkbox" name="map_writers" value="{i}"'
-                f'{" checked" if i in fm.columns else ""}> {escape(_option_label(i, h))}</label>'
-                for i, h in enumerate(headers))
-            rows.append(f'<fieldset class="map-row" aria-describedby="sure-{field}"><legend>Writers</legend>'
-                        f'<div class="checks">{checks}</div>{sure}</fieldset>')
+            # Writers can sit in several columns (Songwriter 1, Songwriter 2...): one dropdown
+            # per column found, plus an empty one to add another.
+            chosen = list(fm.columns) + [None]
+            selects = ""
+            for n, col in enumerate(chosen):
+                extra = "" if n == 0 else ' aria-label="Writers, another column"'  # only the first has the visible label
+                none_label = "(none)" if n == 0 else "(add another column)"
+                selects += (f'<select id="map-writers-{n}" name="map_writers" aria-describedby="sure-writers"{extra}>'
+                            f"{_options(headers, col, none_label)}</select>")
+            rows.append(f'<div class="map-row"><label for="map-writers-0">Writers</label>'
+                        f'<div class="selects">{selects}</div>{sure}</div>')
         else:
-            options = '<option value="">(none)</option>' + "".join(
-                f'<option value="{i}"{" selected" if i in fm.columns else ""}>{escape(_option_label(i, h))}</option>'
-                for i, h in enumerate(headers))
             rows.append(f'<div class="map-row"><label for="map-{field}">{FIELD_LABELS[field]}</label>'
-                        f'<select id="map-{field}" name="map_{field}" aria-describedby="sure-{field}">{options}</select>'
-                        f"{sure}</div>")
+                        f'<select id="map-{field}" name="map_{field}" aria-describedby="sure-{field}">'
+                        f'{_options(headers, fm.columns[0] if fm.columns else None)}</select>{sure}</div>')
 
     samples = [cells for _, cells in table.rows if any(c.strip() for c in cells)][:SAMPLE_ROWS]
     head = "".join(f'<th scope="col">{escape(_option_label(i, h))}</th>' for i, h in enumerate(headers))
     body_rows = "".join("<tr>" + "".join(f"<td>{escape(c)}</td>" for c in r) + "</tr>" for r in samples)
 
-    s = session.settings
-    mock_note = MOCK_TOGGLE_TEXT if mock else ""
-    variants = "".join(
-        privacy_list(sn, ai, mock, f' data-privacy="{int(sn)}{int(ai)}"'
-                     + ("" if (sn, ai) == (s["smart_names"], s["ai_search"]) else " hidden"))
-        for sn in (False, True) for ai in (False, True))
     data_rows = sum(1 for _, cells in table.rows if any(c.strip() for c in cells))
 
     body = f"""
@@ -261,7 +265,7 @@ def columns_page(session, mock=False, error=None):
       <h1 id="columns-title">Check the columns</h1>
       <p class="lead">Retrack read <strong>{escape(session.filename)}</strong>: headers on row {table.header_row}, {data_rows} rows below. Make sure each field points at the right column.</p>
       {alert(*error) if error else ""}
-      <form id="scan-form" class="scan-form" method="post" action="/s/{session.id}/scan">
+      <form method="post" action="/s/{session.id}/columns">
         <fieldset class="mapping"><legend class="h2">Columns</legend>{"".join(rows)}</fieldset>
 
         <section class="preview" aria-labelledby="preview-title">
@@ -271,19 +275,7 @@ def columns_page(session, mock=False, error=None):
           </div>
         </section>
 
-        <fieldset class="settings"><legend class="h2">Extra checks</legend>
-          <label class="switch"><input type="checkbox" id="smart_names" name="smart_names" value="on"{" checked" if s["smart_names"] else ""}>
-            <span><strong>Smart names</strong> {escape(SMART_NAMES_TEXT + mock_note)}</span></label>
-          <label class="switch"><input type="checkbox" id="ai_search" name="ai_search" value="on"{" checked" if s["ai_search"] else ""}>
-            <span><strong>AI search</strong> {escape(AI_SEARCH_TEXT + mock_note)}</span></label>
-        </fieldset>
-
-        <section class="privacy" aria-labelledby="leaves-title">
-          <h2 id="leaves-title">What will leave this computer</h2>
-          <div aria-live="polite">{variants}</div>
-        </section>
-
-        <div class="actions"><button class="btn" type="submit">Check my songs</button>
+        <div class="actions"><button class="btn" type="submit">Next: choose the checks</button>
           <a href="/">Upload a different file</a></div>
       </form>
     </div>
@@ -291,7 +283,45 @@ def columns_page(session, mock=False, error=None):
     return layout("Check the columns, Retrack", body, mock, step="columns")
 
 
-# ---- 3. Check ------------------------------------------------------------------------------
+# ---- 3. Check: choose the extra checks, then run ---------------------------------------------
+
+def _switch(field_id, name, label, sentence, checked, mock, required=False):
+    note = MOCK_TOGGLE_TEXT if mock else ""
+    return (f'<label class="switch"><input type="checkbox" id="{field_id}" name="{name}" value="on"'
+            f'{" checked" if checked else ""}{" required" if required else ""}>'
+            f"<span><strong>{label}</strong> {escape(sentence + note)}</span></label>")
+
+
+def check_page(session, mock=False, error=None):
+    s = session.settings
+    variants = "".join(
+        privacy_list(sn, ai, mock, f' data-privacy="{int(sn)}{int(ai)}"'
+                     + ("" if (sn, ai) == (s["smart_names"], s["ai_search"]) else " hidden"))
+        for sn in (False, True) for ai in (False, True))
+    n = len(session.rows)
+    body = f"""
+  <section class="flow" aria-labelledby="check-title">
+    <div class="container">
+      <h1 id="check-title">Check your songs</h1>
+      <p class="lead">{n} {"song is" if n == 1 else "songs are"} ready to check with The MLC.</p>
+      {_import_notes(session)}
+      {alert(*error) if error else ""}
+      <form id="scan-form" class="scan-form" method="post" action="/s/{session.id}/scan">
+        <fieldset class="settings"><legend class="h2">Extra checks (optional)</legend>
+          {_switch("smart_names", "smart_names", "Smart names", SMART_NAMES_TEXT, s["smart_names"], mock)}
+          {_switch("ai_search", "ai_search", "AI search", AI_SEARCH_TEXT, s["ai_search"], mock)}
+        </fieldset>
+        <section class="privacy" aria-labelledby="leaves-title">
+          <h2 id="leaves-title">What will leave this computer</h2>
+          <div aria-live="polite">{variants}</div>
+        </section>
+        <div class="actions"><button class="btn" type="submit">Start the check</button>
+          <a href="/s/{session.id}/columns">Back to the columns</a></div>
+      </form>
+    </div>
+  </section>"""
+    return layout("Check your songs, Retrack", body, mock, step="check")
+
 
 def progress_text(session):
     if session.total == 0:
@@ -321,7 +351,7 @@ def progress_page(session, mock=False):
 
 def _filter_bar(results):
     counts = {cls: sum(1 for r in results if GROUPS[r.status][0] == cls) for cls, *_ in GROUPS.values()}
-    buttons = [f'<button type="button" class="chip" data-filter="all" aria-pressed="true">All <span class="num">{len(results)}</span></button>']
+    buttons = ['<button type="button" class="chip" data-filter="all" aria-pressed="true">Summary</button>']
     for cls, heading, _, _ in GROUPS.values():
         if counts[cls]:
             buttons.append(f'<button type="button" class="chip is-{cls}" data-filter="{cls}" aria-pressed="false">'
@@ -339,14 +369,41 @@ def _import_notes(session):
     items = "".join(f"<li>Row {p.row}: {escape(p.field)}{' “' + escape(p.value) + '”' if p.value else ''}: "
                     f"{escape(p.problem)} ({escape(p.outcome)})</li>" for p in result.problems)
     not_in = result.rows_in - len(result.rows)
+    n = len(result.problems)
+    not_checked = f", {not_in} {'row' if not_in == 1 else 'rows'} not checked" if not_in else ""
     return f"""<details class="import-notes">
-      <summary>{len(result.problems)} notes from reading your file{f", {not_in} rows not checked" if not_in else ""}</summary>
+      <summary>{n} {"note" if n == 1 else "notes"} from reading your file{not_checked}</summary>
       <ul>{items}</ul>
       <p><a href="/s/{session.id}/import_problems.csv" download>Download these notes (.csv)</a></p>
     </details>"""
 
 
-def _fix_section(session, error=None):
+def _needs_search(session, unfixable_red, mock, error=None):
+    """Red songs fix_kind() can't place yet: AI search tells "register" from "link"."""
+    n = len(unfixable_red)
+    songs = "".join(f'<li><span class="title">{escape(r.row.title)}</span> '
+                    f'<span class="artist">{escape(r.row.artist)}</span></li>' for r in unfixable_red)
+    if session.settings["ai_search"]:
+        head = f"{n} {'song' if n == 1 else 'songs'} couldn’t be searched fully"
+        why = ("The title search didn’t finish for these (The MLC or the AI service didn’t answer), so "
+               "Retrack can’t yet tell whether they need registering. Try again in a few minutes.")
+    else:
+        head = f"{n} {'song needs' if n == 1 else 'songs need'} AI search first"
+        why = ("Retrack found no match for these ISRCs. AI search tells whether each song needs registering "
+               "or is already registered under another title, since registering it twice creates a duplicate.")
+    return f"""<div class="needs-search" role="region" aria-labelledby="needs-title">
+        <h3 id="needs-title">{head}</h3>
+        <p>{why}</p>
+        <ul class="needs-list">{songs}</ul>
+        {alert(*error) if error else ""}
+        <form method="post" action="/s/{session.id}/recheck">
+          {_switch("recheck-ai", "ai_search", "AI search", AI_SEARCH_TEXT, session.settings["ai_search"], mock, required=True)}
+          <button class="btn btn--quiet" type="submit">Check {"this song" if n == 1 else f"these {n} songs"} again</button>
+        </form>
+      </div>"""
+
+
+def _fix_section(session, error=None, mock=False, recheck_error=None):
     fixable = [(i, r) for i, r in enumerate(session.results) if fix_kind(r)]
     unfixable_red = [r for r in session.results if r.status == RED and not fix_kind(r)]
     if not fixable and not unfixable_red:
@@ -360,8 +417,6 @@ def _fix_section(session, error=None):
         f'<span class="artist">{escape(r.row.artist)}</span></span>'
         f'<span class="fix-kind">{escape(KIND_TEXT[fix_kind(r)])}</span></label></li>'
         for i, r in fixable)
-    skipped = "".join(f'<li class="fix-skip"><span class="title">{escape(r.row.title)}</span> '
-                      f"can’t go in a fix pack yet. {UNSPLIT_RED_TEXT}</li>" for r in unfixable_red)
     form = ""
     if fixable:
         form = f"""<form id="fix-form" method="post" action="/s/{session.id}/fix" data-lines="{escape(json.dumps(lines))}">
@@ -373,16 +428,16 @@ def _fix_section(session, error=None):
     return f"""<section class="fix" aria-labelledby="fix-title">
       <h2 id="fix-title">Fix pack</h2>
       <p class="lead">Tick the songs you want fixed. You get the files to upload to The MLC yourself.</p>
+      {_needs_search(session, unfixable_red, mock, recheck_error) if unfixable_red else ""}
       {form}
-      {f'<ul class="fix-list">{skipped}</ul>' if skipped else ""}
     </section>"""
 
 
-def results_page(session, mock=False, error=None):
+def results_page(session, mock=False, error=None, recheck_error=None):
     results = session.results
     claude_note = ""
     if session.claude_failures:
-        claude_note = ('<p class="notice" role="status"><strong>Claude didn’t answer for '
+        claude_note = ('<p class="notice" role="status"><strong>The AI service didn’t answer for '
                        f"{session.claude_failures} {'check' if session.claude_failures == 1 else 'checks'}.</strong> "
                        "Those songs were checked without it, so some matches may be missing. Nothing is "
                        "wrong with your file. Check again later for the full result.</p>")
@@ -390,7 +445,10 @@ def results_page(session, mock=False, error=None):
         list_html = ('<div class="empty-state"><h2>Nothing to fix</h2><p>Every song is registered at The MLC, '
                      "fully claimed, and your writers match. Check again after your next release.</p></div>")
     else:
-        list_html = f'{_filter_bar(results)}<div class="song-list">{groups_html(results, expanded=False)}</div>'
+        list_html = (f'{_filter_bar(results)}'
+                     f'<section class="findings-panel" data-summary aria-labelledby="summary-title">'
+                     f'<h2 id="summary-title">Summary</h2>{findings_html(results)}</section>'
+                     f'<div class="song-list">{groups_html(results, expanded=False)}</div>')
     body = f"""
   <section class="flow results" aria-labelledby="results-title">
     <div class="container">
@@ -408,7 +466,7 @@ def results_page(session, mock=False, error=None):
       {claude_note}
       {_import_notes(session)}
       {list_html}
-      {_fix_section(session, error)}
+      {_fix_section(session, error, mock, recheck_error)}
       {privacy_panel(session, mock)}
     </div>
   </section>"""

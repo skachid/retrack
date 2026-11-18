@@ -34,9 +34,10 @@ class Session:
     proposed: dict = None  # what the rules proposed, to keep their confidence
     settings: dict = field(default_factory=lambda: {"smart_names": False, "ai_search": False})
     import_result: object = None  # importer.ImportResult
-    rows: list = field(default_factory=list)     # CatalogRows being checked
-    results: list = field(default_factory=list)  # checker Results, in catalog order
-    state: str = "columns"  # columns -> running -> done | failed
+    rows: list = field(default_factory=list)     # CatalogRows, in catalog order
+    results: list = field(default_factory=list)  # checker Results, one per row
+    todo: list = field(default_factory=list)     # row numbers this run checks (all, or a re-check)
+    state: str = "columns"  # columns -> ready -> running -> done | failed
     done: int = 0
     error: tuple = None     # (title, message) when state == "failed"
     claude_failures: int = 0
@@ -44,7 +45,7 @@ class Session:
 
     @property
     def total(self):
-        return len(self.rows)
+        return len(self.todo)
 
     def fail(self, title, message):
         self.error = (title, message)

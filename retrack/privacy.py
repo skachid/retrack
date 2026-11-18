@@ -1,5 +1,8 @@
 """What leaves this computer, for a given set of scan settings.
 
+The page copy says "an AI service" rather than naming Claude: users only need
+to know that it's an outside AI and exactly what it receives.
+
 data_flows() is the single source of truth. Every privacy sentence in the web
 UI is built from it, and tests/test_web.py runs real scans with each toggle
 combination and checks that what is actually sent matches it exactly. So if
@@ -17,7 +20,7 @@ ORDER = (ISRCS, SONG_CODES, TITLES, WRITER_NAMES)
 @dataclass(frozen=True)
 class Flows:
     mlc: frozenset     # what goes to The MLC's Public Search API
-    claude: frozenset  # what goes to the Claude API
+    claude: frozenset  # what goes to the AI service (the Claude API); the UI says "an AI service"
 
 
 def data_flows(smart_names=False, ai_search=False, mock=False):
@@ -58,16 +61,16 @@ def privacy_items(smart_names=False, ai_search=False, mock=False):
     if mock:
         mlc = ("Nothing goes to The MLC.", "Sample data mode: every answer comes from Retrack’s "
                                            "built-in test data.")
-        claude = ("Nothing goes to Claude.", "Sample data mode uses offline stand-ins for the "
-                                             "extra checks.")
+        claude = ("Nothing goes to an AI service.", "Sample data mode uses offline stand-ins for the "
+                                                    "extra checks.")
     else:
         mlc = (f"To The MLC: {_listed(flows.mlc)}.",
                "Only those, through its Public Search API. Never the whole file.")
         if flows.claude:
-            claude = (f"To Claude: {_listed(flows.claude)}.",
-                      "Only for the extra checks you turned on. No ISRCs, no audio, no money figures.")
+            claude = (f"To an AI service: {_listed(flows.claude)}.",
+                      "Only for the extra checks you turned on. ISRCs, audio and money figures never go there.")
         else:
-            claude = ("Nothing goes to Claude.", "The extra checks are off.")
+            claude = ("Nothing goes to an AI service.", "The extra checks are off.")
     return [KEPT, mlc, claude, NO_AUDIO]
 
 
