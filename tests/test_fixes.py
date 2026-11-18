@@ -298,7 +298,7 @@ def test_match_suggestions_file(plan, tmp_path):
     text = (tmp_path / FILES["matches"]).read_text()
     assert "ISRC,MLC Song Code,Your Title,MLC Title,Your Writers,MLC Writers,Confidence" in text
     assert "QZABC2400005,BH3456,Blue Hour,THE BLUE HOUR,Jide Okafor,Jyde Okafor,90%" in text
-    assert "Please confirm" in text
+    assert "please confirm each one" in (tmp_path / "README.md").read_text()  # the note lives in the README
 
 
 def test_fix_pack_readme_explains_each_file_and_the_upload_steps(plan, tmp_path):
@@ -320,17 +320,83 @@ def mlc_format(name):
     return name.endswith(".xlsx") or name.startswith("BulkMatchSuggestions_")
 
 
-def test_compliance_text_is_in_our_files_and_not_in_mlc_format_files(plan, tmp_path):
+def test_compliance_text_is_in_the_readme_attestation_and_checklist(plan, tmp_path):
     template = tmp_path / "t.xlsx"
     make_template(template)
     out = tmp_path / "out"
     written = build_fix_pack(plan, out, confirm("test"), template)
-    assert {"README.md", "ATTESTATION.txt"} <= set(written)
-    for name in written:
-        if name.endswith(".xlsx"):
-            continue  # checked in test_template_copy_is_untouched_apart_from_filled_rows
-        text = (out / name).read_text(encoding="utf-8")
-        assert (COMPLIANCE_TEXT in text) is not mlc_format(name), name
+    for name in ("README.md", "ATTESTATION.txt", "claim_checklist.md"):
+        assert name in written
+        assert COMPLIANCE_TEXT in (out / name).read_text(encoding="utf-8"), name
+    for name in written:  # never inside a CSV or a file The MLC dictates the format of
+        if name.endswith(".csv"):
+            assert COMPLIANCE_TEXT not in (out / name).read_text(encoding="utf-8"), name
+
+
+def test_cli_csvs_start_with_the_header_and_have_no_hash_lines(plan, tmp_path):
+    written = build_fix_pack(plan, tmp_path, confirm("test"))
+    csvs = [n for n in written if n.endswith(".csv")]
+    assert {"registration_worksheet.csv", "match_suggestions.csv"} <= set(csvs)
+    for name in csvs:
+        lines = (tmp_path / name).read_text(encoding="utf-8").splitlines()
+        assert not any(line.lstrip().startswith(("#", '"#')) for line in lines), name
+    assert (tmp_path / "registration_worksheet.csv").read_text().splitlines()[0].startswith("Work Title,MLC Song Code")
+    assert (tmp_path / "match_suggestions.csv").read_text().splitlines()[0].startswith("ISRC,MLC Song Code")
+
+
+# ---- The web fix pack: Retrack_Fixes_YYYYMMDD.xlsx ------------------------------------------
+
+def fixes_workbook(plan, tmp_path):
+    path = tmp_path / fixes.fixes_workbook_name()
+    fixes.write_fixes_workbook(plan, confirm("test"), path)
+    return load_workbook(path)
+
+
+def test_fixes_workbook_has_the_tabs_with_headers_on_row_1(plan, tmp_path):
+    wb = fixes_workbook(plan, tmp_path)
+    assert wb.sheetnames == ["Summary", "Register", "Link", "Claim", "Confirmation"]
+    expected_first = {"Summary": "Song", "Register": "Work Title", "Link": "ISRC", "Claim": "Song",
+                      "Confirmation": "Field"}
+    for name, first in expected_first.items():
+        assert wb[name]["A1"].value == first, name  # headers on row 1, nothing above them
+    assert fixes.fixes_workbook_name().startswith("Retrack_Fixes_") and fixes.fixes_workbook_name().endswith(".xlsx")
+
+
+def test_fixes_workbook_summary_has_price_line_and_compliance(plan, tmp_path):
+    values = [c.value for row in fixes_workbook(plan, tmp_path)["Summary"].iter_rows() for c in row]
+    assert price_line(plan.songs) in values
+    assert COMPLIANCE_TEXT in values
+    assert {"Register", "Link", "Claim"} <= set(values)
+
+
+def test_fixes_workbook_never_fills_ownership_cells(plan, tmp_path):
+    wb = fixes_workbook(plan, tmp_path)
+    reg = wb["Register"]
+    headers = [c.value for c in reg[1]]
+    assert reg.max_row >= 2
+    for row in range(2, reg.max_row + 1):
+        for name in ("Writer IPI", "Writer Role Code", "Publisher Name", "Publisher IPI", "Collection Share"):
+            cell = reg.cell(row=row, column=headers.index(name) + 1)
+            assert cell.value is None
+            assert cell.fill.start_color.rgb.endswith("FFF2CC")
+            assert MUST_FILL in cell.comment.text
+    claim = wb["Claim"]
+    headers = [c.value for c in claim[1]]
+    for row in range(2, claim.max_row + 1):
+        cell = claim.cell(row=row, column=headers.index("Your share to claim (%)") + 1)
+        assert cell.value is None and MUST_FILL in cell.comment.text
+
+
+def test_fixes_workbook_records_the_confirmation(plan, tmp_path):
+    rows = {r[0].value: r[1].value for r in fixes_workbook(plan, tmp_path)["Confirmation"].iter_rows(min_row=2)}
+    assert rows["Statement"] == ATTESTATION_TEXT
+    assert rows["How"] == "test" and rows["Confirmed at (UTC)"].startswith("20")
+
+
+def test_fixes_workbook_needs_attestation(plan, tmp_path):
+    with pytest.raises(FixPackError):
+        fixes.write_fixes_workbook(plan, None, tmp_path / "x.xlsx")
+    assert not (tmp_path / "x.xlsx").exists()
 
 
 def test_template_copy_is_untouched_apart_from_filled_rows(plan, tmp_path):

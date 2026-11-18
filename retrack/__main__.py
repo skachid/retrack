@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from . import importer
+from .env import load_env
 from .checker import check_catalog, load_catalog
 from .fixes import (FIXES_DIR, TEMPLATE_HELP, FixPackError, ask_for_attestation, build_fix_pack,
                     check_template, confirm, plan_fixes, price_line)
@@ -29,6 +30,7 @@ from .report import print_summary, render_html, write_csv
 
 def main(argv=None, input_fn=input, stdin_is_tty=None):
     argv = sys.argv[1:] if argv is None else argv
+    load_env()  # .env in this folder, if there is one
     if argv[:1] == ["import"]:  # python -m retrack import my_sheet.xlsx --out catalog.csv
         return importer.main(argv[1:], input_fn=input_fn, stdin_is_tty=stdin_is_tty)
 

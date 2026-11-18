@@ -1,7 +1,7 @@
 """The fix pack: files that help the user fix the songs they choose (the paid part).
 
 The scan is free. Fixing costs a flat FIX_PRICE_USD per song, the same for every
-verdict. (No payment is taken yet; that comes with the web app.)
+verdict. The web UI takes payment through Stripe (payments.py); the CLI takes none.
 
 What each kind of song gets:
   REGISTER ("Not found anywhere")
@@ -146,7 +146,7 @@ def total_price(songs):
 def price_line(songs):
     n = len(songs)
     return (f"{n} {'song' if n == 1 else 'songs'} × ${FIX_PRICE_USD:,.2f} = "
-            f"${total_price(songs):,.2f} (same price for every verdict; no payment is taken yet)")
+            f"${total_price(songs):,.2f} (same price for every verdict)")
 
 
 # ---- Attestation -----------------------------------------------------------------
@@ -301,6 +301,18 @@ def _preamble(*extra):
     return [COMPLIANCE_TEXT, NEVER_TEXT, *extra]
 
 
+def split_for_template(register, layout):
+    """(songs to put in the template, songs that must be claimed instead).
+
+    A song with a known MLC song code already has a work. If the template has no
+    song code column it can't say so, and registering it would create a duplicate.
+    """
+    if "song_code" in layout.columns:
+        return list(register), []
+    return ([r for r in register if not first_song_code(r)],
+            [r for r in register if first_song_code(r)])
+
+
 def write_template_copy(template_path, songs, out_path):
     """Fill a copy of the user's own template. The original file is never changed."""
     from openpyxl.comments import Comment
@@ -354,8 +366,8 @@ def write_worksheet(songs, out_path):
     """No template given: a CSV worksheet to copy from. It is NOT The MLC's template."""
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        for line in _preamble("THIS IS NOT THE MLC'S TEMPLATE. It's a worksheet to copy from. " + TEMPLATE_HELP):
-            w.writerow([f"# {line}"])
+        # The header comes first, with no note lines above it, so spreadsheet apps and
+        # scripts read it cleanly. What the file is (and isn't) is explained in README.md.
         w.writerow([heading for heading, _ in WORKSHEET_COLUMNS])
         rows = 0
         for result in songs:
@@ -375,18 +387,20 @@ def write_match_suggestions(songs, out_path):
     """ISRC <-> MLC song code suggestions for the user to confirm, one row per song."""
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        for line in _preamble("These are SUGGESTIONS. Please confirm each one before submitting it "
-                              "(write yes in the Confirmed column). See README.md for the steps."):
-            w.writerow([f"# {line}"])
-        w.writerow(["ISRC", "MLC Song Code", "Your Title", "MLC Title", "Your Writers", "MLC Writers",
-                    "Confidence", "Confirmed (yes/no)", "Notes"])
+        w.writerow(LINK_HEADERS)  # header first; "please confirm each row" is in README.md
         for r in songs:
-            c = r.suggested_match
-            notes = ""
-            if r.other_matches:
-                notes = "Also possible: " + ", ".join(o.song_code for o in r.other_matches)
-            w.writerow([r.row.isrc, c.song_code, r.row.title, c.title, "; ".join(r.row.writers),
-                        "; ".join(c.writers), f"{c.confidence:.0%}", "", notes])
+            w.writerow(link_row(r))
+
+
+LINK_HEADERS = ["ISRC", "MLC Song Code", "Your Title", "MLC Title", "Your Writers", "MLC Writers",
+                "Confidence", "Confirmed (yes/no)", "Notes"]
+
+
+def link_row(r):
+    c = r.suggested_match
+    notes = "Also possible: " + ", ".join(o.song_code for o in r.other_matches) if r.other_matches else ""
+    return [r.row.isrc, c.song_code, r.row.title, c.title, "; ".join(r.row.writers),
+            "; ".join(c.writers), f"{c.confidence:.0%}", "", notes]
 
 
 def bulk_match_name(today=None):
@@ -407,6 +421,107 @@ def write_bulk_match(songs, out_path):
             if isrc and code and isrc not in seen:
                 seen.add(isrc)
                 w.writerow([isrc, code])
+
+
+# ---- The web fix pack: one workbook -------------------------------------------------------
+
+CLAIM_HEADERS = ["Song", "Artist", "ISRC", "MLC Song Code", "Share claimed now", "Writers at The MLC",
+                 "Your writers missing there", "What to do", "Your share to claim (%)",
+                 "IPIs of the missing writers"]
+CLAIM_MUST = ("Your share to claim (%)", "IPIs of the missing writers")
+
+
+def fixes_workbook_name(today=None):
+    today = today or datetime.date.today()
+    return f"Retrack_Fixes_{today:%Y%m%d}.xlsx"
+
+
+def claim_row(r):
+    return {"Song": r.row.title, "Artist": r.row.artist, "ISRC": r.row.isrc, "MLC Song Code": r.song_code,
+            "Share claimed now": f"{r.claimed_share:g}%", "Writers at The MLC": ", ".join(r.mlc_writers),
+            "Your writers missing there": ", ".join(r.missing_writers), "What to do": " ".join(r.fixes)}
+
+
+def write_fixes_workbook(plan, attestation, out_path):
+    """Everything for the paid songs in one .xlsx: Summary, Register, Link, Claim, Confirmation.
+
+    Every data tab has its headers on row 1, with nothing above them. Ownership
+    cells (shares, IPIs, role codes, publishers) are left blank, highlighted and
+    marked "YOU MUST FILL THIS IN"; Retrack never fills them.
+    """
+    if not isinstance(attestation, Attestation) or attestation.statement != ATTESTATION_TEXT:
+        raise FixPackError("No confirmation, no files.")
+    from openpyxl import Workbook
+    from openpyxl.comments import Comment
+    from openpyxl.styles import Font, PatternFill
+
+    highlight = PatternFill(fill_type="solid", start_color="FFF2CC", end_color="FFF2CC")
+    bold = Font(bold=True)
+
+    def sheet(title, headers, wb):
+        ws = wb.create_sheet(title)
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.font = bold
+        ws.freeze_panes = "A2"
+        for i, h in enumerate(headers, start=1):
+            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = max(14, min(40, len(h) + 4))
+        return ws
+
+    def must_fill(cell):
+        cell.value = None
+        cell.fill = highlight
+        cell.comment = Comment(f"{MUST_FILL}. Retrack never guesses ownership data.", "Retrack")
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    summary = sheet("Summary", ["Song", "Artist", "ISRC", "Fix", "What you get", "Price (USD)"], wb)
+    what = {REGISTER: "Rows for The MLC’s Bulk Work Registration (Register tab)",
+            LINK: "A match to confirm and submit (Link tab)",
+            CLAIM: "Steps to claim in The MLC Portal (Claim tab)"}
+    for r in plan.songs:
+        kind = fix_kind(r)
+        summary.append([r.row.title, r.row.artist, r.row.isrc, kind.capitalize(), what[kind], price_of(r)])
+    summary.append([])
+    summary.append(["Total", price_line(plan.songs)])
+    summary.append([])
+    summary.append([COMPLIANCE_TEXT])
+    summary.append([NEVER_TEXT])
+
+    register = sheet("Register", [h for h, _ in WORKSHEET_COLUMNS], wb)
+    for r in plan.register:
+        for values in registration_rows(r):
+            register.append([None if name == MUST else values.get(name, "") for _, name in WORKSHEET_COLUMNS])
+            row = register.max_row
+            for col, (_, name) in enumerate(WORKSHEET_COLUMNS, start=1):
+                no_writer = name in ("writer_first", "writer_last") and not values["writer_name"]
+                if name == MUST or no_writer:
+                    must_fill(register.cell(row=row, column=col))
+
+    link = sheet("Link", LINK_HEADERS, wb)
+    for r in plan.link:
+        link.append(link_row(r))
+
+    claim = sheet("Claim", CLAIM_HEADERS, wb)
+    for r in plan.claim:
+        values = claim_row(r)
+        claim.append([values.get(h) for h in CLAIM_HEADERS])
+        row = claim.max_row
+        for h in CLAIM_MUST:
+            if h == "IPIs of the missing writers" and not r.missing_writers:
+                continue
+            must_fill(claim.cell(row=row, column=CLAIM_HEADERS.index(h) + 1))
+
+    confirmation = sheet("Confirmation", ["Field", "Value"], wb)
+    for field_name, value in [("Statement", attestation.statement),
+                              ("Confirmed at (UTC)", attestation.confirmed_at),
+                              ("How", attestation.method),
+                              ("Songs", "; ".join(r.row.title for r in plan.songs)),
+                              ("Disclaimer", COMPLIANCE_TEXT)]:
+        confirmation.append([field_name, value])
+
+    wb.save(out_path)
 
 
 def _claim_section(r, already_registered=False):
@@ -537,10 +652,7 @@ def build_fix_pack(plan, out_dir, attestation, template_path=None):
     register, already_registered = list(plan.register), []
     if template_path is not None:
         workbook, layout = open_template(template_path)  # check it before writing anything
-        if "song_code" not in layout.columns:
-            # A work exists but the template can't say so: registering it would duplicate it.
-            already_registered = [r for r in register if first_song_code(r)]
-            register = [r for r in register if not first_song_code(r)]
+        register, already_registered = split_for_template(register, layout)
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

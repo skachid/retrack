@@ -62,12 +62,33 @@ pip install -r requirements.txt
 python -m retrack sample_catalog.csv --mock
 
 # With the real MLC API (after you're approved):
-cp .env.example .env   # fill in your MLC login
-export $(cat .env | xargs)
+cp .env.example .env   # then fill in your MLC login
 python -m retrack your_catalog.csv --out report.csv
 ```
 
-Run the tests: `pytest`
+Retrack reads `.env` by itself when it starts, so there's nothing to `export`. A variable you set in the terminal wins over `.env`. `.env` is git-ignored; never put real values in `.env.example`, which is committed.
+
+Run the tests: `pytest`. They never read your `.env` and never call Stripe.
+
+## Set up `.env`
+
+`.env.example` lists every setting, all blank. Copy it to `.env` and fill in only what you use:
+
+| Variable | What it's for | Needed? |
+|---|---|---|
+| `MLC_USERNAME`, `MLC_PASSWORD` | Your Public Search API login from The MLC | For real checks |
+| `ANTHROPIC_API_KEY` | The AI features (Smart names, AI search, `--smart-import`) | Optional |
+| `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY` | Taking payment for the fix pack in the web UI | Optional: without them, "Pay (demo)" |
+| `RETRACK_PAYMENTS_LIVE` | Set to `1` only to allow a live Stripe key (real money) | Leave blank |
+
+### Getting Stripe test keys
+
+1. Make a free account at [stripe.com](https://stripe.com), or a sandbox with the Stripe CLI (`stripe sandbox create`), which needs no sign-up.
+2. In the Dashboard, make sure you're in **test mode** or a **sandbox** (not live), then go to **Developers → API keys**.
+3. Copy the **Publishable key** (`pk_test_...`) into `STRIPE_PUBLISHABLE_KEY`, and the **Secret key** (`sk_test_...`) into `STRIPE_SECRET_KEY`. Stripe recommends a **restricted key** (`rk_test_...`) instead of the secret key: give it write access to Checkout Sessions only.
+4. Start Retrack (`python -m retrack.web`). It prints "Payments: Stripe test mode". On the pay step, use card **4242 4242 4242 4242**, any future date and any CVC.
+
+Retrack refuses to start with a live key (`sk_live_...`) unless `RETRACK_PAYMENTS_LIVE=1` is also set, and it never prints your keys. Before taking real money on a public server, add a Stripe webhook handler; see Known limits (v1).
 
 ## Find songs the ISRC doesn't lead to (`--ai-search`)
 
@@ -92,7 +113,7 @@ Only song titles and writer names are sent to Claude: no audio, no ISRCs, no art
 
 ## Fix pack (`--fix`)
 
-The scan is free. The fix pack is the paid part: a flat **$5.00 per fixed song** (a placeholder price, `FIX_PRICE_USD` in `retrack/fixes.py`), the same price whatever the verdict. No payment is taken yet; that comes with the web app.
+The scan is free. The fix pack is the paid part: a flat **$5.00 per fixed song** (a placeholder price, `FIX_PRICE_USD` in `retrack/fixes.py`), the same price whatever the verdict. The web UI takes payment through Stripe (below). The command line takes no payment; it's for you, the owner.
 
 ```bash
 # Every song that can be fixed:
@@ -138,7 +159,16 @@ Your browser opens **http://localhost:8000**, and you go through five steps:
    - **AI search**: looks for songs that are registered but not linked to your ISRC.
    Below them, "What will leave this computer" updates as you switch them on and off. Then press **Start the check** and watch "Checking 37 of 120…", which updates by itself.
 4. **Report.** The red/yellow/green report. **Summary** groups what Retrack found ("1 song is only partly claimed: Paper Crowns"); the other filters show one colour. There are also notes from reading your file. Download it as HTML or print it.
-5. **Fix pack.** Tick the songs to fix, see "N songs × $X", confirm that you reviewed the data and control the shares, and download the fix pack as a `.zip`. Without the confirmation, no files are made. Red songs that need AI search before Retrack can tell whether to register or link them are listed together above the list, with a checkbox and a button that checks just those songs again.
+5. **Fix pack.** Tick the songs to fix and see "N songs × $X = $Total". Confirm that you reviewed the data and control the shares (without the confirmation, nothing is unlocked), then press **Pay and see your fixes**. You pay once for the whole order on Stripe's own checkout page; Retrack never sees your card number. Back on Retrack, the **fix pack page** shows:
+   - each paid song, grouped by Register, Link and Claim, with what Retrack filled in, every "You must fill this in" field highlighted, and step-by-step instructions
+   - **one main download**, `Retrack_Fixes_YYYYMMDD.xlsx`, with Summary, Register, Link, Claim and Confirmation tabs
+   - **For submitting to The MLC**, when it applies: the bulk match CSV in The MLC's exact format, and an optional step to upload your own MLC Bulk Work template so Retrack fills a copy
+
+   **The page disappears when you leave or after 60 minutes**, so print it (Cmd+P), download it, or screenshot it. Your browser also asks before you leave. Red songs that need AI search are listed together above the songs to tick, with a checkbox and a button that checks just those songs again.
+
+   Without Stripe keys (or with `--mock`), the button is **Pay (demo)**, which skips Stripe and charges nothing, so everything runs locally.
+
+   If you cancel on Stripe's page, you come back to your results with nothing lost. If the payment fails, nothing is charged. Paying for the same order twice is impossible: pressing the button again reuses the same checkout, and songs already paid for are never charged again. After 60 minutes your files are deleted: "Your files were deleted for your privacy. Please upload again."
 
 Every error says what went wrong and what to do next: the wrong kind of file, no ISRC column, The MLC turning down the login or not answering, or Claude not being set up.
 
@@ -203,10 +233,13 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 | `retrack/web.py` | The web UI's routes: upload, columns, the check in the background, results, fix pack download, delete. |
 | `retrack/web_pages.py` | The HTML for each step of the web UI. |
 | `retrack/sessions.py` | Where uploads are kept while you work, and how they're deleted. |
+| `retrack/payments.py` | Payments: one Stripe Checkout per order, the check that it's really paid, demo mode, and the live-key guard. |
+| `retrack/env.py` | Reads `.env` when Retrack starts. |
 | `retrack/privacy.py` | What leaves your computer for each setting. Every privacy sentence comes from here. |
 | `retrack/home.css`, `retrack/home.js` | The web UI's styles and its small script (drag and drop, live progress, the running total). Every page still works with JavaScript off. |
 | `retrack/preview.py` | `--serve`: a tiny local web server (Python's built-in `http.server`) for the HTML report. |
 | `tests/test_checker.py` | One test per verdict, plus name and ISRC cleanup. |
+| `tests/test_payments.py` | Payments with Stripe faked: unpaid sessions see nothing, tampered return links, one charge per order, live keys refused, demo mode offline, the fix page and its downloads, `.env` loading. |
 | `tests/test_web.py` | The web UI end to end: upload → columns → check → fix pack download, attestation refusal, every error, file deletion, and privacy text that matches what's actually sent. |
 | `tests/test_work_search.py` | `--ai-search`: the song-code search, the search limits, both searchers, and the two red cases. |
 | `tests/test_importer.py` | `import`: reading messy files, both mappers, the confirmation step, every cleanup rule, and a test proving only the header + 5 rows reach Claude. |
@@ -223,6 +256,8 @@ Apply for The MLC's **Public Search API** on their Data Programs page: https://w
 
 ## Known limits (v1)
 
+- **Payments need a webhook before going public.** Locally, Retrack checks your payment with Stripe when you come back from checkout, and again whenever you open the results or fix page, so a lost redirect still unlocks your fixes. A public server must also handle Stripe's `checkout.session.completed` and `checkout.session.async_payment_succeeded` webhooks (with signature checks), because customers don't always come back to the page.
+- The fix pack page lives for 60 minutes. Nothing is kept on a server.
 - Only checks The MLC. SoundExchange and ASCAP/BMI Songview have no public API, so the report links to them for a manual check.
 - Name matching is basic by default. "J. Okafor" won't match "Jide Okafor" unless you add `--smart-names`, which asks the Claude API about names that don't match exactly. Only the two writer names are sent. It needs `ANTHROPIC_API_KEY` and `pip install anthropic`. `--mock` uses offline rules instead, so it needs no key.
 - If one ISRC links to several works, only the first is checked.
@@ -235,5 +270,6 @@ Apply for The MLC's **Public Search API** on their Data Programs page: https://w
 3. ✅ Plain-English HTML report (`--html`, `--serve`); print it to PDF from the browser
 4. ✅ Find registered-but-unlinked songs by title and writers (`--ai-search`)
 5. ✅ Local web UI, end to end: upload → columns → check → report → fix pack
-6. Hosted web app (Next.js + Supabase + Vercel), with payments
-7. Multi-artist label dashboard + monthly re-scan alerts
+6. ✅ Stripe test payments for the fix pack (one checkout per order)
+7. Hosted web app (Next.js + Supabase + Vercel), with a Stripe webhook
+8. Multi-artist label dashboard + monthly re-scan alerts

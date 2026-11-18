@@ -20,7 +20,9 @@ from pathlib import Path
 
 from .checker import GREEN, RED
 from .compliance import ATTESTATION_TEXT, COMPLIANCE_TEXT, NEVER_TEXT
-from .fixes import CLAIM, FIX_PRICE_USD, LINK, REGISTER, TEMPLATE_HELP, fix_kind, price_line
+from .fixes import (CLAIM, FIX_PRICE_USD, LINK, REGISTER, bulk_match_name, fix_kind, fixes_workbook_name,
+                    price_line)
+from .payments import DEMO, DEMO_BANNER, TEST, TEST_BANNER
 from .importer import FIELDS, LOW_CONFIDENCE, REQUIRED, SAMPLE_ROWS, column_letter
 from .privacy import privacy_items
 from .report import CSS_PATH, GROUPS, MANUAL_CHECKS, date_text, findings_html, groups_html, summary_html
@@ -102,6 +104,7 @@ def layout(title, body, mock=False, step=None, head_extra=""):
     <p>Retrack checks The MLC’s Public Search API, which covers US streaming mechanicals.
     SoundExchange and ASCAP/BMI have no public API, so check those by hand: {manual}.</p>
     <p class="small compliance">{escape(COMPLIANCE_TEXT)}</p>
+    <p class="small"><a href="/privacy">Privacy</a></p>
   </div>
 </footer>
 <script>
@@ -403,10 +406,21 @@ def _needs_search(session, unfixable_red, mock, error=None):
       </div>"""
 
 
+def _paid_rows(session, rows):
+    if not rows:
+        return ""
+    items = "".join(f'<li class="fix-paid"><span class="title">{escape(r.row.title)}</span> '
+                    f'<span class="fix-kind">Paid</span></li>' for r in rows)
+    return (f'<ul class="fix-list paid">{items}</ul>'
+            f'<p><a href="/s/{session.id}/fixes">See your fixes</a></p>')
+
+
 def _fix_section(session, error=None, mock=False, recheck_error=None):
-    fixable = [(i, r) for i, r in enumerate(session.results) if fix_kind(r)]
+    paid = set(session.paid_songs)
+    fixable = [(i, r) for i, r in enumerate(session.results) if fix_kind(r) and i not in paid]
+    paid_rows = [r for i, r in enumerate(session.results) if i in paid]
     unfixable_red = [r for r in session.results if r.status == RED and not fix_kind(r)]
-    if not fixable and not unfixable_red:
+    if not fixable and not unfixable_red and not paid_rows:
         return ""
     # Every possible total, worked out by the same price_line() the CLI uses, so the
     # page's script only picks one; it never does the sum itself.
@@ -422,7 +436,7 @@ def _fix_section(session, error=None, mock=False, recheck_error=None):
         form = f"""<form id="fix-form" method="post" action="/s/{session.id}/fix" data-lines="{escape(json.dumps(lines))}">
         {alert(*error) if error else ""}
         <ul class="fix-list">{items}</ul>
-        <p id="fix-total" class="fix-total" aria-live="polite">${FIX_PRICE_USD:,.2f} per song, the same for every verdict. No payment is taken yet.</p>
+        <p id="fix-total" class="fix-total" aria-live="polite">${FIX_PRICE_USD:,.2f} per song, the same for every verdict. You pay on the next step.</p>
         <button class="btn" type="submit">Review my fix pack</button>
       </form>"""
     return f"""<section class="fix" aria-labelledby="fix-title">
@@ -430,10 +444,26 @@ def _fix_section(session, error=None, mock=False, recheck_error=None):
       <p class="lead">Tick the songs you want fixed. You get the files to upload to The MLC yourself.</p>
       {_needs_search(session, unfixable_red, mock, recheck_error) if unfixable_red else ""}
       {form}
+      {_paid_rows(session, paid_rows)}
     </section>"""
 
 
-def results_page(session, mock=False, error=None, recheck_error=None):
+PAY_NOTICES = {
+    "canceled": "Payment canceled. Nothing was charged, and your results are all still here.",
+    "failed": "Your payment didn’t go through, so nothing was charged. Tick your songs and try again.",
+    "processing": "Stripe is still confirming your payment. Reload this page in a minute to check again.",
+}
+
+
+def _paid_link(session):
+    if not session.paid_songs:
+        return ""
+    return (f'<p class="notice-ok" role="status">You’ve paid for {len(session.paid_songs)} '
+            f'{"fix" if len(session.paid_songs) == 1 else "fixes"}. '
+            f'<a href="/s/{session.id}/fixes">See your fixes</a></p>')
+
+
+def results_page(session, mock=False, error=None, recheck_error=None, notice=""):
     results = session.results
     claude_note = ""
     if session.claude_failures:
@@ -462,6 +492,8 @@ def results_page(session, mock=False, error=None, recheck_error=None):
           <button type="button" class="btn btn--quiet" data-print hidden>Print</button>
         </div>
       </div>
+      {f'<p class="notice" role="status">{escape(PAY_NOTICES[notice])}</p>' if notice in PAY_NOTICES else ""}
+      {_paid_link(session)}
       {summary_html(results, mock)}
       {claude_note}
       {_import_notes(session)}
@@ -473,39 +505,215 @@ def results_page(session, mock=False, error=None, recheck_error=None):
     return layout(f"Results for {session.filename}, Retrack", body, mock, step="report")
 
 
-# ---- 5. Fix pack ---------------------------------------------------------------------------
+# ---- 5. Pay, then the fix pack ---------------------------------------------------------------
 
-def review_page(session, plan, chosen, mock=False, error=None):
-    rows = "".join(f"<li><span class=\"title\">{escape(r.row.title)}</span> "
-                   f"<span class=\"fix-kind\">{escape(KIND_TEXT[fix_kind(r)])}</span></li>" for r in plan.songs)
+VANISH_TEXT = ("This page disappears when you leave or after 60 minutes. "
+               "Print, download, or screenshot it to keep it.")
+
+
+def payment_privacy(payment_mode):
+    if payment_mode == DEMO:
+        return ("No payment is taken in demo mode.",
+                "Pay (demo) skips Stripe, so nothing is charged and no payment service is contacted.")
+    return ("Payments are handled by Stripe.", "Retrack never sees your card number.")
+
+
+def pay_page(session, plan, chosen, mock=False, payment_mode=DEMO, error=None):
+    rows = "".join(f'<li><span class="title">{escape(r.row.title)}</span> '
+                   f'<span class="fix-kind">{escape(KIND_TEXT[fix_kind(r)])}</span></li>' for r in plan.songs)
     hidden = "".join(f'<input type="hidden" name="song" value="{i}">' for i in chosen)
-    template = ""
-    if plan.register:
-        template = f"""<div class="field">
-          <label for="template">Your MLC template (optional)</label>
-          <input type="file" id="template" name="template" accept=".xlsx" aria-describedby="template-help">
-          <p id="template-help" class="helper">{escape(TEMPLATE_HELP.replace(' Then run Retrack again with --template path/to/template.xlsx.', ''))} Without it, you get a worksheet to copy from.</p>
-        </div>"""
+    banner = {TEST: f'<p class="pay-banner" role="note"><strong>{escape(TEST_BANNER)}</strong></p>',
+              DEMO: f'<p class="pay-banner" role="note"><strong>{escape(DEMO_BANNER)}</strong></p>'}.get(payment_mode, "")
+    button = "Pay (demo)" if payment_mode == DEMO else "Pay and see your fixes"
+    head, sentence = payment_privacy(payment_mode)
     body = f"""
-  <section class="flow" aria-labelledby="review-title">
+  <section class="flow" aria-labelledby="pay-title">
     <div class="container narrow">
-      <h1 id="review-title">Your fix pack</h1>
+      <h1 id="pay-title">Your fix pack</h1>
       <p class="lead price">{escape(price_line(plan.songs))}</p>
       <ul class="review-list">{rows}</ul>
-      <form method="post" action="/s/{session.id}/fix/download" enctype="multipart/form-data">
+      {banner}
+      <form method="post" action="/s/{session.id}/pay">
         {alert(*error) if error else ""}
         {hidden}
-        {template}
         <label class="attest"><input type="checkbox" name="attest" value="yes" required>
           <span>{escape(ATTESTATION_TEXT)}</span></label>
-        <p class="never">{escape(NEVER_TEXT)}</p>
+        <p class="never">{escape(head)} {escape(sentence)} {escape(NEVER_TEXT)}</p>
         <p class="compliance-box">{escape(COMPLIANCE_TEXT)}</p>
-        <div class="actions"><button class="btn" type="submit">Download fix pack (.zip)</button>
+        <div class="actions"><button class="btn" type="submit">{button}</button>
           <a href="/s/{session.id}/results">Back to the results</a></div>
       </form>
     </div>
   </section>"""
     return layout("Your fix pack, Retrack", body, mock, step="fix")
+
+
+MUST_FIELDS = {
+    REGISTER: ["Writer IPI", "Writer role code", "Publisher name", "Publisher IPI", "Collection share"],
+    LINK: ["Confirm this is your song"],
+}
+STEPS_FOR = {
+    REGISTER: [
+        "Download Retrack_Fixes and open the Register tab.",
+        "Fill in every yellow cell: writer IPIs, role codes, publisher names and IPIs, and collection "
+        "shares. Retrack never guesses these. Enter publishing information only for shares you control.",
+        "Log in to your MLC Portal yourself, go to Works Registration, then Bulk Registration Tool, and "
+        "download the Bulk Work Registration template.",
+        "Copy the rows into that template, without moving or deleting its columns, or upload the template "
+        "below and Retrack fills a copy for you.",
+        "Upload it in the Bulk Registration Tool. If a writer is self-administered with no publisher IPI, "
+        "register that song on its own in the Portal instead.",
+    ],
+    LINK: [
+        "Check that the MLC title and writers really are your song. Retrack only suggests the match.",
+        "For a few songs: in your MLC Portal, open the Matching Tool, search for your recording and "
+        "propose the match to the MLC song code shown.",
+        "For many songs: download the bulk match file below, delete any row you didn’t confirm, add your "
+        "member name to the front of the file name, and email it to bulk.matching@themlc.com. The MLC "
+        "says it takes 30 to 90 days.",
+    ],
+    CLAIM: [
+        "Log in to your MLC Portal yourself and open the MLC song code shown.",
+        "Do the steps listed for the song, then claim your share. Only you know how big it is.",
+    ],
+}
+KIND_HEADS = {REGISTER: "Register", LINK: "Link", CLAIM: "Claim"}
+KIND_LEADS = {
+    REGISTER: "Not at The MLC yet: register these songs.",
+    LINK: "Registered, but not linked to your recording: link them.",
+    CLAIM: "Registered, but something’s missing: claim or fix them in the Portal.",
+}
+
+
+def _facts(pairs):
+    return "".join(f"<div><dt>{escape(k)}</dt><dd>{escape(v) if v else '(not known)'}</dd></div>" for k, v in pairs)
+
+
+def _must(labels):
+    return "".join(f'<div class="must"><dt>{escape(k)}</dt><dd>You must fill this in</dd></div>' for k in labels)
+
+
+def _fix_card(r):
+    kind = fix_kind(r)
+    if kind == REGISTER:
+        filled = [("Work title", r.row.title), ("Writers", ", ".join(r.row.writers)),
+                  ("Recording artist", r.row.artist), ("ISRC", r.row.isrc)]
+        if r.song_code:
+            filled.append(("MLC song code", r.song_code))
+        must = list(MUST_FIELDS[REGISTER]) + ([] if r.row.writers else ["Writer names"])
+        steps = []
+    elif kind == LINK:
+        c = r.suggested_match
+        filled = [("Your ISRC", r.row.isrc), ("MLC song code", c.song_code), ("MLC title", c.title),
+                  ("Writers at The MLC", ", ".join(c.writers)), ("How sure", f"{c.confidence:.0%}")]
+        must = MUST_FIELDS[LINK]
+        steps = []
+    else:
+        filled = [("MLC song code", r.song_code), ("Share claimed now", f"{r.claimed_share:g}%"),
+                  ("Writers at The MLC", ", ".join(r.mlc_writers)),
+                  ("Your writers missing there", ", ".join(r.missing_writers) or "None")]
+        must = ["Your share to claim"] + [f"IPI for {w}" for w in r.missing_writers]
+        steps = r.fixes  # this song's own steps, from checker.py
+    own = "".join(f"<li>{escape(x)}</li>" for x in steps)
+    return f"""<article class="fix-card">
+        <h3>{escape(r.row.title)}</h3>
+        <p class="artist">{escape(r.row.artist)}</p>
+        <div class="fix-facts">
+          <div><h4>What Retrack filled in</h4><dl class="facts">{_facts(filled)}</dl></div>
+          <div><h4>What you fill in</h4><dl class="facts must-list">{_must(must)}</dl></div>
+        </div>
+        {f'<h4>For this song</h4><ol class="song-steps">{own}</ol>' if own else ""}
+      </article>"""
+
+
+def fixes_page(session, plan, mock=False, template_note="", error=None):
+    groups = ""
+    for kind, songs in ((REGISTER, plan.register), (LINK, plan.link), (CLAIM, plan.claim)):
+        if not songs:
+            continue
+        steps = "".join(f"<li>{escape(x)}</li>" for x in STEPS_FOR[kind])
+        groups += f"""
+      <section class="fix-group" aria-labelledby="group-{kind}">
+        <div class="group-head"><h2 id="group-{kind}">{KIND_HEADS[kind]}</h2>
+          <span class="count">{len(songs)} {"song" if len(songs) == 1 else "songs"}</span></div>
+        <p class="lead">{KIND_LEADS[kind]}</p>
+        <h3 class="steps-head">How to do it</h3>
+        <ol class="how-to">{steps}</ol>
+        {"".join(_fix_card(r) for r in songs)}
+      </section>"""
+
+    submit = ""
+    if plan.link or plan.register:
+        items = ""
+        if plan.link:
+            items += (f'<li><a href="/s/{session.id}/bulk_match.csv" download data-no-warn>{escape(bulk_match_name())}</a>'
+                      "<p>The links in The MLC’s exact Bulk Match format. You’d need it to link many songs at "
+                      "once by email, instead of one by one in the Matching Tool.</p></li>")
+        if plan.register:
+            copy_link = ""
+            if session_template_ready(session):
+                copy_link = (f'<p><a class="btn btn--quiet" href="/s/{session.id}/bulk_work_registration.xlsx" '
+                             'download data-no-warn>Download your filled-in template</a></p>')
+            items += f"""<li><form method="post" action="/s/{session.id}/template" enctype="multipart/form-data">
+              <label for="template">Upload your MLC Bulk Work template (.xlsx)</label>
+              <input type="file" id="template" name="template" accept=".xlsx" required aria-describedby="template-help">
+              <p id="template-help" class="helper">Get it from your MLC Portal: Works Registration, then Bulk
+              Registration Tool, then download the template. You’d need this to register the songs above in bulk;
+              Retrack fills a copy and leaves your original alone.</p>
+              <button class="btn btn--quiet" type="submit">Fill in my template</button>
+            </form>{escape(template_note) if template_note else ""}{copy_link}</li>"""
+        submit = f"""<section class="submit" aria-labelledby="submit-title">
+        <h2 id="submit-title">For submitting to The MLC</h2>
+        <ul class="submit-list">{items}</ul>
+      </section>"""
+
+    body = f"""
+  <section class="flow fixes" data-warn-leave aria-labelledby="fixes-title">
+    <div class="container">
+      <p class="vanish" role="note">{escape(VANISH_TEXT)}</p>
+      <h1 id="fixes-title">Your fixes</h1>
+      <p class="lead">Paid: {escape(price_line(plan.songs))}. Everything Retrack could fill in is below;
+      the highlighted fields are yours to fill in.</p>
+      {alert(*error) if error else ""}
+      <section class="downloads" aria-labelledby="downloads-title">
+        <h2 id="downloads-title">Keep a copy</h2>
+        <p class="vanish" role="note">{escape(VANISH_TEXT)}</p>
+        <div class="actions">
+          <a class="btn" href="/s/{session.id}/fixes.xlsx" download data-no-warn>Download {escape(fixes_workbook_name())}</a>
+          <button type="button" class="btn btn--quiet" data-print hidden>Print this page</button>
+          <span class="helper">or press Cmd+P (Ctrl+P on Windows) to print.</span>
+        </div>
+        <p class="compliance-box">{escape(COMPLIANCE_TEXT)}</p>
+      </section>
+      {groups}
+      {submit}
+      {privacy_panel(session, mock)}
+    </div>
+  </section>"""
+    return layout("Your fixes, Retrack", body, mock, step="fix")
+
+
+def session_template_ready(session):
+    return (session.folder / "bulk_work_registration.xlsx").exists()
+
+
+def privacy_page(mock=False, payment_mode=DEMO):
+    head, sentence = payment_privacy(payment_mode)
+    items = privacy_items(False, False, mock) + [(head, sentence)]
+    lst = "".join(f"<li><strong>{escape(h)}</strong><span>{escape(t)}</span></li>" for h, t in items)
+    body = f"""
+  <section class="flow" aria-labelledby="privacy-page-title">
+    <div class="container narrow">
+      <h1 id="privacy-page-title">Privacy</h1>
+      <p class="lead">What happens to your catalog, and what leaves this computer.</p>
+      <ul class="privacy-list single">{lst}</ul>
+      <p class="helper">Smart names and AI search are off unless you turn them on; the Check step shows
+      exactly what each one sends before you start. Uploads are deleted after 60 minutes, when you press
+      Delete my files now, or when Retrack stops.</p>
+      <div class="actions"><a class="btn" href="/">Back to Retrack</a></div>
+    </div>
+  </section>"""
+    return layout("Privacy, Retrack", body, mock)
 
 
 # ---- Errors --------------------------------------------------------------------------------

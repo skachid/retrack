@@ -17,7 +17,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -190,23 +189,29 @@ def test_full_flow_upload_columns_scan_report_fix_pack_download(server):
     ids = fixable_ids(page)
     assert ids
 
-    # 5. tick songs -> the review page shows "N songs × $X" from price_line
+    # 5. tick songs -> the pay page shows "N songs × $X = $Total" from price_line
     status, page = text(server, f"/s/{sid}/fix", data=form([("song", i) for i in ids])[0],
                         content_type="application/x-www-form-urlencoded")
     assert status == 200
     assert f"{len(ids)} songs × $" in page
     assert ATTESTATION_TEXT in page and COMPLIANCE_TEXT in page
+    assert "Pay (demo)" in page  # --mock: no Stripe
 
-    # 6. confirm and download the .zip
-    body, ctype = multipart([("song", i) for i in ids] + [("attest", "yes")])
-    status, headers, data = call(server, f"/s/{sid}/fix/download", body, ctype)
+    # 6. confirm and pay (demo) -> the on-screen fix pack
+    status, headers, _ = call(server, f"/s/{sid}/pay", *form([("song", i) for i in ids] + [("attest", "yes")]))
+    assert status == 303 and headers["Location"].endswith("/fixes")
+    status, page = text(server, f"/s/{sid}/fixes")
     assert status == 200
-    assert headers["Content-Type"] == "application/zip"
-    assert "attachment" in headers["Content-Disposition"]
-    names = zipfile.ZipFile(io.BytesIO(data)).namelist()
-    assert "fix_pack/README.md" in names and "fix_pack/ATTESTATION.txt" in names
-    attestation = zipfile.ZipFile(io.BytesIO(data)).read("fix_pack/ATTESTATION.txt").decode()
-    assert "ticked the confirmation box on the Retrack page" in attestation
+    assert "This page disappears when you leave or after 60 minutes." in page
+    assert "You must fill this in" in page and COMPLIANCE_TEXT in page
+
+    # 7. the one main download
+    status, headers, data = call(server, f"/s/{sid}/fixes.xlsx")
+    assert status == 200 and "Retrack_Fixes_" in headers["Content-Disposition"]
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data))
+    assert wb.sheetnames == ["Summary", "Register", "Link", "Claim", "Confirmation"]
+    assert "ticked the confirmation box on the Retrack page" in [c.value for c in wb["Confirmation"]["B"]]
 
 
 def test_corrected_mapping_is_what_gets_checked(server):
@@ -226,7 +231,7 @@ def test_web_checks_the_same_catalog_the_cli_would(server):
 
 # ---- No attestation, no fix pack --------------------------------------------------------------
 
-def test_download_without_attestation_is_refused_and_makes_no_files(server):
+def test_paying_without_attestation_is_refused_and_unlocks_nothing(server):
     sid = scanned(server, ai_search=True)
     _, page = text(server, f"/s/{sid}/results")
     ids = fixable_ids(page)
@@ -234,11 +239,13 @@ def test_download_without_attestation_is_refused_and_makes_no_files(server):
     before = sorted(p.name for p in folder.iterdir())
 
     for extra in ([], [("attest", "no")], [("attest", "")]):
-        body, ctype = multipart([("song", i) for i in ids] + extra)
-        status, headers, data = call(server, f"/s/{sid}/fix/download", body, ctype)
+        status, headers, data = call(server, f"/s/{sid}/pay", *form([("song", i) for i in ids] + extra))
         assert status == 400
         assert headers["Content-Type"].startswith("text/html")
         assert b"No confirmation, no fix pack" in data
+    s = server.sessions.get(sid)
+    assert s.paid_songs == [] and s.attestation is None
+    assert call(server, f"/s/{sid}/fixes")[0] == 402
     assert sorted(p.name for p in folder.iterdir()) == before  # nothing was written
 
 
@@ -519,7 +526,7 @@ def test_server_listens_on_this_computer_only(server):
 
 
 @pytest.mark.parametrize("path", ["/upload", "/s/aaaaaaaaaaaaaaaaaaaaaa/scan", "/s/aaaaaaaaaaaaaaaaaaaaaa/delete",
-                                  "/s/aaaaaaaaaaaaaaaaaaaaaa/fix/download"])
+                                  "/s/aaaaaaaaaaaaaaaaaaaaaa/pay", "/s/aaaaaaaaaaaaaaaaaaaaaa/template"])
 def test_posts_from_other_websites_are_refused(server, path):
     status, _, _ = call(server, path, b"", "application/x-www-form-urlencoded",
                         {"Origin": "https://some-other-site.example"})

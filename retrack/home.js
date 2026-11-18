@@ -113,6 +113,30 @@
     });
   }
 
+  // ---- Fix page: print button, and ask before leaving (the page disappears) ----
+  // The browser shows its own "Leave this page?" message; scripts can't change its words.
+  // Downloads, printing and the template form don't count as leaving.
+  var fixes = document.querySelector("[data-warn-leave]");
+  if (fixes) {
+    fixes.querySelectorAll("[data-print]").forEach(function (b) {
+      b.hidden = false;
+      b.addEventListener("click", function () { window.print(); });
+    });
+    var leavingOnPurpose = false;
+    fixes.addEventListener("click", function (e) {
+      if (e.target.closest("[data-no-warn]")) {
+        leavingOnPurpose = true;
+        setTimeout(function () { leavingOnPurpose = false; }, 1000);
+      }
+    });
+    fixes.addEventListener("submit", function () { leavingOnPurpose = true; });
+    window.addEventListener("beforeunload", function (e) {
+      if (leavingOnPurpose) return;
+      e.preventDefault();
+      e.returnValue = "";
+    });
+  }
+
   // ---- Fix pack: "N songs × $X" as songs are ticked ----
   // The server sends every possible line (0 songs, 1 song, ...); we pick one.
   var fixForm = document.getElementById("fix-form");

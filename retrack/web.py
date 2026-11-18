@@ -14,8 +14,13 @@ The flow, one page per step (pages are built in web_pages.py):
   GET  /s/<id>/progress         "Checking 37 of 120…" (refreshes itself)
   GET  /s/<id>/status           the same, as JSON, for the page's script
   GET  /s/<id>/results          the report, with songs to tick for the fix pack
-  POST /s/<id>/fix              the ticked songs -> review page with the price
-  POST /s/<id>/fix/download     needs the attestation checkbox -> the fix pack .zip
+  POST /s/<id>/fix              the ticked songs -> the pay page ("N songs × $X = $Total")
+  POST /s/<id>/pay              needs the attestation checkbox -> Stripe Checkout (or Pay (demo))
+  GET  /s/<id>/paid             Stripe sends the customer back here; we ask Stripe if it's paid
+  GET  /s/<id>/fixes            the on-screen fix pack (paid songs only)
+  GET  /s/<id>/fixes.xlsx       Retrack_Fixes_YYYYMMDD.xlsx; also bulk_match.csv and, after
+  POST /s/<id>/template         an uploaded MLC template, bulk_work_registration.xlsx
+  GET  /privacy                 what leaves this computer, and how payments work
   POST /s/<id>/delete           "Delete my files now"
   GET  /s/<id>/report.html, /s/<id>/import_problems.csv, /template.csv  downloads
 
@@ -30,16 +35,14 @@ sessions.SessionStore, which deletes them when the server stops.
 """
 
 import argparse
-import datetime
-import io
 import json
+import os
 import re
 import signal
 import sys
-import tempfile
 import threading
+import time
 import webbrowser
-import zipfile
 from email.parser import BytesParser
 from email.policy import HTTP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -50,7 +53,11 @@ import requests
 
 from . import web_pages as pages
 from .checker import RED, check_row, load_catalog
-from .fixes import FixPackError, build_fix_pack, check_template, confirm, fix_kind, plan_fixes
+from .env import load_env
+from .fixes import (FIX_PRICE_USD, FixPackError, bulk_match_name, confirm, fix_kind, fixes_workbook_name,
+                    open_template, plan_fixes, split_for_template, total_price, write_bulk_match,
+                    write_fixes_workbook, write_template_copy)
+from .payments import DEMO, LIVE, TEST, PaymentConfigError, PaymentError, payments_from_env
 from .importer import (FIELDS, REQUIRED, CatalogImportError, FieldMap, HeaderRuleMapper, clean_mapping,
                        convert, read_table, sample_rows, write_catalog, write_problems)
 from .mlc_client import MLCAuthError, MLCClient, MLCError, MockClient
@@ -64,7 +71,10 @@ MAX_UPLOAD_BYTES = 5_000_000  # a big .xlsx catalog is well under this
 MAX_FORM_BYTES = 200_000      # the non-file forms (columns, ticked songs)
 MAX_SONGS = 500               # each song is at least 2 API calls, so keep one check to minutes
 TEMPLATE_CSV = "title,artist,isrc,writers\r\n"
-SESSION_PATH = re.compile(r"^/s/([A-Za-z0-9_-]{22})/(columns|check|scan|recheck|progress|status|results|fix|fix/download|"
+XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+EXPIRED_TEXT = "Your files were deleted for your privacy. Please upload again."
+SESSION_PATH = re.compile(r"^/s/([A-Za-z0-9_-]{22})/(columns|check|scan|recheck|progress|status|results|fix|pay|paid|"
+                          r"fixes|fixes\.xlsx|bulk_match\.csv|template|bulk_work_registration\.xlsx|"
                           r"delete|report\.html|import_problems\.csv)$")
 
 
@@ -195,7 +205,8 @@ class Config:
     """Everything the handler needs, passed in (dependency injection), so tests can
     swap the MLC and Claude for fakes."""
 
-    def __init__(self, make_client, mock, sessions, make_name_matcher, make_work_searcher):
+    def __init__(self, make_client, mock, sessions, make_name_matcher, make_work_searcher, payments):
+        self.payments = payments  # payments.StripePayments or DemoPayments
         self.make_client = make_client
         self.mock = mock
         self.sessions = sessions
@@ -247,7 +258,11 @@ def make_handler(config):
         def _form(self):
             return parse_qs(self._body(MAX_FORM_BYTES).decode("utf-8", "replace"))
 
-        def _gone(self):
+        def _gone(self, session_id=""):
+            if config.sessions.expired(session_id):
+                return self._send(410, pages.error_page(
+                    "This check has ended", EXPIRED_TEXT, mock,
+                    action='<a class="btn" href="/">Upload again</a>'))
             self._send(404, pages.error_page(
                 "This check has ended",
                 "Retrack deletes files when you press Delete my files now or stop it, so this page "
@@ -259,6 +274,8 @@ def make_handler(config):
             if url.path in ("/", "/index.html"):
                 notice = "Your files were deleted from this computer." if url.query == "deleted=1" else ""
                 return self._send(200, pages.home_page(mock, notice=notice))
+            if url.path == "/privacy":
+                return self._send(200, pages.privacy_page(mock, config.payments.mode))
             if url.path == "/favicon.ico":
                 return self._send(204, b"", "image/x-icon")  # no icon; just don't log an error
             if url.path == "/template.csv":
@@ -269,7 +286,7 @@ def make_handler(config):
                 return self.send_error(404, "Nothing here. Retrack is at /")
             session = config.sessions.get(match.group(1))
             if session is None:
-                return self._gone()
+                return self._gone(match.group(1))
             getattr(self, "get_" + re.sub(r"[^a-z]", "_", match.group(2)), self._not_found)(session)
 
         def do_POST(self):
@@ -284,7 +301,7 @@ def make_handler(config):
                     return self.send_error(404)
                 session = config.sessions.get(match.group(1))
                 if session is None:
-                    return self._gone()
+                    return self._gone(match.group(1))
                 getattr(self, "post_" + re.sub(r"[^a-z]", "_", match.group(2)), self._not_found)(session)
             except UploadError as e:
                 self._send(400, pages.home_page(mock, error=("Retrack couldn’t use that", str(e))))
@@ -433,7 +450,9 @@ def make_handler(config):
         def get_results(self, session):
             if session.state != "done":
                 return self._redirect(f"/s/{session.id}/progress")
-            self._send(200, pages.results_page(session, mock))
+            self._sync_order(session)
+            notice = (parse_qs(urlsplit(self.path).query).get("checkout") or [""])[0]
+            self._send(200, pages.results_page(session, mock, notice=notice))
 
         def get_report_html(self, session):
             if session.state != "done":
@@ -448,65 +467,201 @@ def make_handler(config):
             self._send(200, path.read_bytes(), "text/csv; charset=utf-8",
                        [("Content-Disposition", 'attachment; filename="import_problems.csv"')])
 
-        # -- 5. fix pack --
+        # -- 5. fix pack: tick songs -> confirm -> pay -> verify -> fixes --
         def _chosen(self, session, values):
             n = len(session.results)
             chosen = sorted({int(v) for v in values if v.isdigit() and int(v) < n})
             return [i for i in chosen if fix_kind(session.results[i])]
 
+        def _paid_plan(self, session):
+            return plan_fixes([session.results[i] for i in session.paid_songs])
+
+        def _base_url(self):
+            """Where Stripe should send the customer back: this same Retrack, as the browser sees it."""
+            port = self.server.server_port
+            host = self.headers.get("Host", "")
+            return f"http://{host}" if host in (f"localhost:{port}", f"127.0.0.1:{port}") else f"http://localhost:{port}"
+
+        def _mark_paid(self, session, songs):
+            session.paid_songs = sorted(set(session.paid_songs) | set(songs))
+            session.order = None
+
+        def _verified(self, session, checkout):
+            """The only test for "paid": Stripe says so, about the order we created for this session."""
+            order = session.order
+            return (order is not None and checkout.id == order["checkout_id"]
+                    and checkout.client_reference_id == session.id
+                    and checkout.payment_status == "paid"
+                    and checkout.amount_total == order["amount"])
+
+        def _sync_order(self, session):
+            """If an order is open, ask Stripe about it (covers a customer who paid but never
+            made it back to the return page). Quietly does nothing if Stripe doesn't answer."""
+            if session.order is None or config.payments.mode == DEMO:
+                return
+            try:
+                checkout = config.payments.retrieve(session.order["checkout_id"])
+            except PaymentError:
+                return
+            if self._verified(session, checkout):
+                self._mark_paid(session, session.order["songs"])
+
         def post_fix(self, session):
             if session.state != "done":
                 return self._redirect(f"/s/{session.id}/progress")
-            chosen = self._chosen(session, self._form().get("song", []))
+            chosen = [i for i in self._chosen(session, self._form().get("song", [])) if i not in session.paid_songs]
             if not chosen:
                 return self._send(400, pages.results_page(session, mock, error=(
                     "No songs ticked", "Tick at least one song to fix, then press Review my fix pack.")))
             plan = plan_fixes([session.results[i] for i in chosen])
-            self._send(200, pages.review_page(session, plan, chosen, mock))
+            self._send(200, pages.pay_page(session, plan, chosen, mock, config.payments.mode))
 
-        def post_fix_download(self, session):
+        def post_pay(self, session):
             if session.state != "done":
                 return self._redirect(f"/s/{session.id}/progress")
-            fields = parse_multipart(self.headers.get("Content-Type", ""), self._body(MAX_UPLOAD_BYTES))
-            chosen = self._chosen(session, [v for v in fields.get("song", []) if isinstance(v, str)])
+            form = self._form()
+            # Songs already paid for are never charged again.
+            chosen = [i for i in self._chosen(session, form.get("song", [])) if i not in session.paid_songs]
             if not chosen:
-                return self._redirect(f"/s/{session.id}/results")
+                return self._redirect(f"/s/{session.id}/{'fixes' if session.paid_songs else 'results'}")
             plan = plan_fixes([session.results[i] for i in chosen])
 
             # No attestation, no fix pack: checked here, on the server, not just by the
             # checkbox's "required" attribute (which a browser or script can skip).
-            if fields.get("attest") != ["yes"]:
-                return self._send(400, pages.review_page(session, plan, chosen, mock, error=(
+            if form.get("attest") != ["yes"]:
+                return self._send(400, pages.pay_page(session, plan, chosen, mock, config.payments.mode, error=(
                     "No confirmation, no fix pack",
-                    "Tick the box to confirm you reviewed the data and control the shares, "
-                    "then press Download again. No files were made.")))
+                    "Tick the box to confirm you reviewed the data and control the shares, then press "
+                    "the button again. Nothing was charged.")))
+            session.attestation = confirm("ticked the confirmation box on the Retrack page")
 
-            template_path = None
+            if config.payments.mode == DEMO:
+                self._mark_paid(session, chosen)
+                return self._redirect(f"/s/{session.id}/fixes")
+
+            amount = round(total_price(plan.songs) * 100)  # in cents, for checking Stripe's total
+            order = session.order
+            try:
+                if order is not None:
+                    checkout = config.payments.retrieve(order["checkout_id"])
+                    if self._verified(session, checkout):  # already paid in another tab
+                        self._mark_paid(session, order["songs"])
+                        return self._redirect(f"/s/{session.id}/fixes")
+                    if order["songs"] == chosen and checkout.status == "open":
+                        return self._redirect(checkout.url)  # the same order: reuse it, never a second charge
+                    if checkout.status == "open":
+                        config.payments.expire(checkout.id)  # a different order replaces it: close the old one
+                session.orders_placed += 1
+                base = self._base_url()
+                checkout = config.payments.create_checkout(
+                    reference=session.id, quantity=len(chosen), unit_amount_cents=round(FIX_PRICE_USD * 100),
+                    success_url=f"{base}/s/{session.id}/paid?checkout_session_id={{CHECKOUT_SESSION_ID}}",
+                    cancel_url=f"{base}/s/{session.id}/results?checkout=canceled",
+                    idempotency_key=f"retrack-{session.id}-order-{session.orders_placed}")
+            except PaymentError as e:
+                return self._send(502, pages.pay_page(session, plan, chosen, mock, config.payments.mode, error=(
+                    "Stripe didn’t answer", f"Nothing was charged. Wait a minute and press the button again. ({e})")))
+            session.order = {"songs": chosen, "checkout_id": checkout.id, "url": checkout.url, "amount": amount}
+            self._redirect(checkout.url)
+
+        def get_paid(self, session):
+            """Stripe sends the customer back here. The URL proves nothing: ask Stripe."""
+            query = parse_qs(urlsplit(self.path).query)
+            checkout_id = (query.get("checkout_session_id") or [""])[0]
+            order = session.order
+            if order is None and session.paid_songs:
+                return self._redirect(f"/s/{session.id}/fixes")  # already verified (a reload)
+            if order is None or checkout_id != order["checkout_id"]:
+                return self._send(400, pages.error_page(
+                    "That payment link doesn’t match this check",
+                    "Retrack couldn’t find a payment for this check behind that link, so nothing was unlocked. "
+                    "Go back to your results and try again; you won’t be charged twice.", mock, step="fix",
+                    action=f'<a class="btn" href="/s/{session.id}/results">Back to the results</a>'))
+            try:
+                checkout = config.payments.retrieve(checkout_id)
+            except PaymentError:
+                return self._send(502, pages.error_page(
+                    "Stripe didn’t answer", "If you paid, your payment is safe. Reload this page in a minute.",
+                    mock, step="fix"))
+            if self._verified(session, checkout):
+                self._mark_paid(session, order["songs"])
+                return self._redirect(f"/s/{session.id}/fixes")
+            if checkout.client_reference_id != session.id or checkout.id != order["checkout_id"]:
+                return self._send(400, pages.error_page(
+                    "That payment link doesn’t match this check", "Nothing was unlocked.", mock, step="fix"))
+            notice = "processing" if checkout.status == "complete" else "failed"
+            self._redirect(f"/s/{session.id}/results?checkout={notice}")
+
+        def _need_paid(self, session):
+            if session.paid_songs:
+                return False
+            self._send(402, pages.error_page(
+                "Pay first to see the fixes",
+                "Your results are free. The fixes for each song show here once the payment is done.",
+                mock, step="fix", action=f'<a class="btn" href="/s/{session.id}/results">Back to the results</a>'))
+            return True
+
+        def get_fixes(self, session):
+            self._sync_order(session)
+            if self._need_paid(session):
+                return
+            self._send(200, pages.fixes_page(session, self._paid_plan(session), mock, session.template_note))
+
+        def get_fixes_xlsx(self, session):
+            if self._need_paid(session):
+                return
+            path = session.folder / fixes_workbook_name()
+            write_fixes_workbook(self._paid_plan(session), session.attestation, path)
+            self._send(200, path.read_bytes(), XLSX_TYPE,
+                       [("Content-Disposition", f'attachment; filename="{path.name}"')])
+
+        def get_bulk_match_csv(self, session):
+            if self._need_paid(session):
+                return
+            plan = self._paid_plan(session)
+            if not plan.link:
+                return self._not_found()
+            name = bulk_match_name()
+            write_bulk_match(plan.link, session.folder / name)  # The MLC's exact format, nothing added
+            self._send(200, (session.folder / name).read_bytes(), "text/csv; charset=utf-8",
+                       [("Content-Disposition", f'attachment; filename="{name}"')])
+
+        def post_template(self, session):
+            if self._need_paid(session):
+                return
+            plan = self._paid_plan(session)
+            fields = parse_multipart(self.headers.get("Content-Type", ""), self._body(MAX_UPLOAD_BYTES))
             uploads = [v for v in fields.get("template", []) if isinstance(v, tuple) and v[1]]
-            if uploads:
-                template_path = session.folder / "template.xlsx"
-                template_path.write_bytes(uploads[0][1])
-                try:
-                    check_template(template_path)
-                except FixPackError as e:
-                    template_path.unlink(missing_ok=True)
-                    return self._send(400, pages.review_page(session, plan, chosen, mock, error=(
-                        "Retrack couldn’t use that template", f"{e} Or leave it out to get a worksheet instead.")))
+            if not plan.register or not uploads:
+                return self._redirect(f"/s/{session.id}/fixes")
+            template = session.folder / "your_template.xlsx"
+            template.write_bytes(uploads[0][1])
+            try:
+                _, layout = open_template(template)
+                to_fill, claim_instead = split_for_template(plan.register, layout)
+                if not to_fill:
+                    raise FixPackError("Every song to register already has an MLC song code, and this template "
+                                       "has no column for it, so there’s nothing safe to put in it.")
+                write_template_copy(template, to_fill, session.folder / "bulk_work_registration.xlsx")
+            except FixPackError as e:
+                return self._send(400, pages.fixes_page(session, plan, mock, error=(
+                    "Retrack couldn’t use that template", f"{e} Your fixes above are unchanged.")))
+            finally:
+                template.unlink(missing_ok=True)  # only the filled copy is kept
+            session.template_note = (
+                f" {len(claim_instead)} {'song is' if len(claim_instead) == 1 else 'songs are'} not in the copy: "
+                "they already have an MLC song code and your template has no column for it, so claim them in "
+                "the Portal instead of registering them twice." if claim_instead else "")
+            self._redirect(f"/s/{session.id}/fixes")
 
-            attestation = confirm("ticked the confirmation box on the Retrack page")
-            with tempfile.TemporaryDirectory(dir=session.folder) as out:
-                try:
-                    written = build_fix_pack(plan, out, attestation, template_path)
-                except FixPackError as e:
-                    return self._send(400, pages.review_page(session, plan, chosen, mock,
-                                                             error=("Retrack couldn’t make the fix pack", str(e))))
-                buffer = io.BytesIO()
-                with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
-                    for name in written:
-                        z.write(Path(out) / name, f"fix_pack/{name}")
-            stamp = datetime.date.today().strftime("%Y%m%d")
-            self._send(200, buffer.getvalue(), "application/zip",
-                       [("Content-Disposition", f'attachment; filename="retrack-fix-pack-{stamp}.zip"')])
+        def get_bulk_work_registration_xlsx(self, session):
+            if self._need_paid(session):
+                return
+            path = session.folder / "bulk_work_registration.xlsx"
+            if not path.exists():
+                return self._not_found()
+            self._send(200, path.read_bytes(), XLSX_TYPE,
+                       [("Content-Disposition", 'attachment; filename="bulk_work_registration.xlsx"')])
 
         # -- delete --
         def post_delete(self, session):
@@ -520,7 +675,7 @@ def make_handler(config):
 
 
 def start_server(make_client, mock=False, host=HOST, port=PORT, sessions=None,
-                 make_name_matcher=None, make_work_searcher=None):
+                 make_name_matcher=None, make_work_searcher=None, payments=None):
     """Open the port and return the server (not running yet). port=0 picks any free port.
 
     The server always listens on `host`, which defaults to 127.0.0.1 (this computer only).
@@ -530,10 +685,23 @@ def start_server(make_client, mock=False, host=HOST, port=PORT, sessions=None,
         make_name_matcher = MockNameMatcher if mock else ClaudeNameMatcher
     if make_work_searcher is None:
         make_work_searcher = MockWorkSearcher if mock else ClaudeWorkSearcher
-    config = Config(make_client, mock, sessions, make_name_matcher, make_work_searcher)
+    if payments is None:
+        payments = payments_from_env(os.environ, mock)  # raises PaymentConfigError for an unsafe key
+    config = Config(make_client, mock, sessions, make_name_matcher, make_work_searcher, payments)
     server = ThreadingHTTPServer((host, port), make_handler(config))
     server.sessions = sessions
+    server.payments = payments
+    _start_sweeper(sessions)
     return server
+
+
+def _start_sweeper(sessions, every=60):
+    """Delete sessions past their 60 minutes even when nobody is using the page."""
+    def loop():
+        while True:
+            time.sleep(every)
+            sessions.sweep()
+    threading.Thread(target=loop, daemon=True).start()
 
 
 def main(argv=None, open_browser=webbrowser.open):
@@ -541,6 +709,7 @@ def main(argv=None, open_browser=webbrowser.open):
     parser.add_argument("--mock", action="store_true", help="sample data from fixtures/: nothing leaves this computer")
     parser.add_argument("--port", type=int, default=PORT, help=f"port to use (default: {PORT})")
     args = parser.parse_args(argv)
+    load_env()  # .env in this folder, if there is one: no need to export variables by hand
 
     if args.mock:
         make_client = MockClient
@@ -554,9 +723,16 @@ def main(argv=None, open_browser=webbrowser.open):
 
     try:
         server = start_server(make_client, args.mock, port=args.port)
+    except PaymentConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     except OSError:
         print(port_busy_message(args.port))
         return 1
+    if server.payments.mode == TEST:
+        print("Payments: Stripe test mode (no real money).")
+    elif server.payments.mode == LIVE:
+        print("Payments: Stripe LIVE mode. Real cards will be charged.")
     previous = stop_on_signals()
     try:
         return run_until_stopped(server, open_browser)
