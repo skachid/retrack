@@ -202,7 +202,7 @@ def test_full_flow_upload_columns_scan_report_fix_pack_download(server):
     assert status == 303 and headers["Location"].endswith("/fixes")
     status, page = text(server, f"/s/{sid}/fixes")
     assert status == 200
-    assert "This page disappears when you leave or after 60 minutes." in page
+    assert "Your fixes stay here for 60 minutes, then your files are deleted for your privacy." in page
     assert "You must fill this in" in page and COMPLIANCE_TEXT in page
 
     # 7. the one main download

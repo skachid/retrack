@@ -239,6 +239,7 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
 
 /* The fix page: one group per fix type, one card per song */
 .vanish { padding: var(--space-sm) var(--space-md); border: var(--rule-hair) solid var(--color-ink); font-size: var(--text-sm); font-weight: 600; }
+.vanish .time-left { margin-top: var(--space-2xs); font-weight: 400; font-variant-numeric: tabular-nums; }
 .fixes h1 { margin-top: var(--space-xl); }
 .downloads { margin-top: var(--space-xl); padding-top: var(--space-lg); border-top: 3px double var(--color-rule-2); }
 .downloads h2, .submit h2 { font-size: var(--text-xl); }

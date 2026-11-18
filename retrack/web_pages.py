@@ -25,6 +25,7 @@ from .fixes import (CLAIM, FIX_PRICE_USD, LINK, REGISTER, bulk_match_name, fix_k
 from .payments import DEMO, DEMO_BANNER, TEST, TEST_BANNER
 from .importer import FIELDS, LOW_CONFIDENCE, REQUIRED, SAMPLE_ROWS, column_letter
 from .privacy import privacy_items
+from .sessions import SESSION_SECONDS
 from .report import CSS_PATH, GROUPS, MANUAL_CHECKS, date_text, findings_html, groups_html, summary_html
 
 HERE = Path(__file__).parent
@@ -59,7 +60,7 @@ def _stylesheet():
 
 
 SAMPLE_BANNER = ('<div class="sample-banner" role="note"><div class="container">'
-                 "<strong>Sample data, not real results.</strong> Retrack is running with --mock: "
+                 "<strong>Sample data, not real results.</strong> Retrack is running with sample data: "
                  "every answer comes from built-in test data, not The MLC.</div></div>")
 
 
@@ -507,8 +508,24 @@ def results_page(session, mock=False, error=None, recheck_error=None, notice="")
 
 # ---- 5. Pay, then the fix pack ---------------------------------------------------------------
 
-VANISH_TEXT = ("This page disappears when you leave or after 60 minutes. "
-               "Print, download, or screenshot it to keep it.")
+def keep_text(seconds=SESSION_SECONDS):
+    """The warning on the fix page, built from the session's real lifetime so it can't drift."""
+    minutes = seconds // 60
+    return (f"Your fixes stay here for {minutes} {'minute' if minutes == 1 else 'minutes'}, then your "
+            "files are deleted for your privacy. Print, download, or screenshot this page to keep it.")
+
+
+def time_left_text(seconds):
+    if seconds <= 0:
+        return "Time’s up: your files are being deleted."
+    minutes = -(-seconds // 60)  # round up: "about 1 minute" until the very end
+    return f"About {minutes} {'minute' if minutes == 1 else 'minutes'} left."
+
+
+def _time_left(session, seconds_left):
+    # Rendered here, so it's right with scripting off; home.js asks /time_left to keep it current.
+    return (f'<p class="time-left" data-time-left-url="/s/{session.id}/time_left" aria-live="polite">'
+            f"{escape(time_left_text(seconds_left))}</p>")
 
 
 def payment_privacy(payment_mode):
@@ -626,7 +643,8 @@ def _fix_card(r):
       </article>"""
 
 
-def fixes_page(session, plan, mock=False, template_note="", error=None):
+def fixes_page(session, plan, mock=False, template_note="", error=None, seconds_left=SESSION_SECONDS,
+               lifetime=SESSION_SECONDS):
     groups = ""
     for kind, songs in ((REGISTER, plan.register), (LINK, plan.link), (CLAIM, plan.claim)):
         if not songs:
@@ -670,14 +688,14 @@ def fixes_page(session, plan, mock=False, template_note="", error=None):
     body = f"""
   <section class="flow fixes" data-warn-leave aria-labelledby="fixes-title">
     <div class="container">
-      <p class="vanish" role="note">{escape(VANISH_TEXT)}</p>
+      <div class="vanish" role="note"><p>{escape(keep_text(lifetime))}</p>{_time_left(session, seconds_left)}</div>
       <h1 id="fixes-title">Your fixes</h1>
       <p class="lead">Paid: {escape(price_line(plan.songs))}. Everything Retrack could fill in is below;
       the highlighted fields are yours to fill in.</p>
       {alert(*error) if error else ""}
       <section class="downloads" aria-labelledby="downloads-title">
         <h2 id="downloads-title">Keep a copy</h2>
-        <p class="vanish" role="note">{escape(VANISH_TEXT)}</p>
+        <div class="vanish" role="note"><p>{escape(keep_text(lifetime))}</p>{_time_left(session, seconds_left)}</div>
         <div class="actions">
           <a class="btn" href="/s/{session.id}/fixes.xlsx" download data-no-warn>Download {escape(fixes_workbook_name())}</a>
           <button type="button" class="btn btn--quiet" data-print hidden>Print this page</button>

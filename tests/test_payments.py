@@ -19,7 +19,8 @@ from retrack.fixes import FIX_PRICE_USD
 from retrack.mlc_client import MockClient
 from retrack.payments import (DEMO, LIVE, TEST, TEST_BANNER, DemoPayments, PaymentConfigError, StripePayments,
                               payments_from_env)
-from retrack.sessions import SessionStore
+from retrack.sessions import SESSION_SECONDS, SessionStore
+from retrack.web_pages import keep_text, time_left_text
 
 from test_web import call, fixable_ids, form, scan, text, upload_ok, wait_done
 
@@ -336,7 +337,7 @@ def test_fix_page_groups_by_type_with_prefilled_and_must_fill(paid):
     _, page = text(srv, f"/s/{sid}/fixes")
     for head in ('id="group-register">Register', 'id="group-link">Link', 'id="group-claim">Claim'):
         assert head in page
-    assert page.count("This page disappears when you leave or after 60 minutes.") == 2  # top and downloads
+    assert page.count(keep_text()) == 2  # at the top and by the downloads
     assert "What Retrack filled in" in page and '<div class="must">' in page
     assert "data-warn-leave" in page
     visible = re.sub(r"<[^>]+>", " ", page.split("<main>")[1].split("</main>")[0])
@@ -402,5 +403,253 @@ def test_web_main_loads_the_env_file(tmp_path, monkeypatch, capsys):
 def test_env_example_lists_every_variable_blank():
     values = parse_env((ROOT / ".env.example").read_text())
     for name in ("MLC_USERNAME", "MLC_PASSWORD", "ANTHROPIC_API_KEY", "STRIPE_SECRET_KEY",
-                 "STRIPE_PUBLISHABLE_KEY", "RETRACK_PAYMENTS_LIVE"):
+                 "STRIPE_PUBLISHABLE_KEY", "STRIPE_WEBHOOK_SECRET", "RETRACK_PAYMENTS_LIVE"):
         assert name in values and values[name] == "", name
+
+
+# ---- The fix page warning tells the truth --------------------------------------------------------
+
+def test_warning_text_matches_session_seconds():
+    minutes = SESSION_SECONDS // 60
+    assert keep_text() == (f"Your fixes stay here for {minutes} minutes, then your files are deleted for your "
+                           "privacy. Print, download, or screenshot this page to keep it.")
+    assert "disappears when you leave" not in keep_text()  # a refresh never loses a paid page
+    assert keep_text(30 * 60).startswith("Your fixes stay here for 30 minutes")
+
+
+def test_time_left_is_rendered_by_the_server_and_counts_down(tmp_path):
+    now = [0.0]
+    srv = start(tmp_path, DemoPayments(), clock=lambda: now[0])
+    try:
+        sid, ids = ready_to_pay(srv)
+        pay(srv, sid, ids)
+        page = text(srv, f"/s/{sid}/fixes")[1]
+        assert time_left_text(SESSION_SECONDS) == "About 60 minutes left."
+        assert page.count("About 60 minutes left.") == 2  # in the page itself: works with JS off
+        assert 'data-time-left-url="/s/' in page  # for the script's live updates
+        now[0] += 15 * 60
+        assert "About 45 minutes left." in text(srv, f"/s/{sid}/fixes")[1]
+        import json
+        status, _, body = call(srv, f"/s/{sid}/time_left")
+        assert status == 200 and json.loads(body) == {"seconds": 45 * 60, "text": "About 45 minutes left."}
+    finally:
+        srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
+
+
+@pytest.mark.parametrize("seconds,expected", [(3600, "About 60 minutes left."), (61, "About 2 minutes left."),
+                                              (60, "About 1 minute left."), (5, "About 1 minute left."),
+                                              (0, "Time’s up: your files are being deleted.")])
+def test_time_left_wording(seconds, expected):
+    assert time_left_text(seconds) == expected
+
+
+# ---- The signed Stripe webhook ---------------------------------------------------------------------
+
+import hashlib
+import hmac
+import json
+import time as _time
+
+SECRET = "whsec_test_secret"
+
+
+def signed(event, secret=SECRET, timestamp=None):
+    """A webhook body and Stripe-Signature header, signed the way Stripe signs them."""
+    payload = json.dumps(event).encode()
+    t = int(timestamp if timestamp is not None else _time.time())
+    sig = hmac.new(secret.encode(), f"{t}.".encode() + payload, hashlib.sha256).hexdigest()
+    return payload, f"t={t},v1={sig}"
+
+
+def checkout_event(checkout_id, reference, paid=True, amount=None, kind="checkout.session.completed", n=1):
+    return {"id": f"evt_{n}", "object": "event", "type": kind, "data": {"object": {
+        "id": checkout_id, "object": "checkout.session", "client_reference_id": reference,
+        "payment_status": "paid" if paid else "unpaid", "status": "complete",
+        "amount_total": amount, "url": None}}}
+
+
+def webhook(srv, payload, signature=None, origin=None):
+    headers = {"Content-Type": "application/json"}
+    if signature:
+        headers["Stripe-Signature"] = signature
+    if origin:
+        headers["Origin"] = origin
+    return call(srv, "/stripe/webhook", payload, headers=headers)
+
+
+@pytest.fixture
+def hooked(tmp_path):
+    """A server with fake Stripe and a webhook secret; logs collected for checking."""
+    payments, sessions = fake_stripe()
+    logs = []
+    srv = web.start_server(MockClient, mock=True, port=0, sessions=SessionStore(tmp_path / "sessions"),
+                           payments=payments, webhook_secret=SECRET, log=logs.append)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv.fake, srv.logs = sessions, logs
+    yield srv
+    srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
+
+
+def open_order(srv):
+    sid, ids = ready_to_pay(srv)
+    pay(srv, sid, ids)
+    order = srv.sessions.get(sid).order
+    return sid, ids, order
+
+
+def test_unsigned_or_badly_signed_webhooks_are_rejected(hooked):
+    sid, _, order = open_order(hooked)
+    event = checkout_event(order["checkout_id"], sid, amount=order["amount"])
+    payload, good = signed(event)
+    assert webhook(hooked, payload)[0] == 400  # no signature at all
+    assert webhook(hooked, payload, signed(event, secret="whsec_wrong")[1])[0] == 400  # signed by someone else
+    assert webhook(hooked, payload + b" ", good)[0] == 400  # body changed after signing
+    assert webhook(hooked, payload, signed(event, timestamp=_time.time() - 3600)[1])[0] == 400  # an old replay
+    assert hooked.sessions.get(sid).paid_songs == []
+
+
+def test_no_webhook_secret_means_no_webhook_is_trusted(stripe_server):
+    sid, ids = ready_to_pay(stripe_server)
+    pay(stripe_server, sid, ids)
+    order = stripe_server.sessions.get(sid).order
+    payload, sig = signed(checkout_event(order["checkout_id"], sid, amount=order["amount"]))
+    assert webhook(stripe_server, payload, sig)[0] == 400  # this server has no STRIPE_WEBHOOK_SECRET
+    assert stripe_server.sessions.get(sid).paid_songs == []
+
+
+def test_a_valid_webhook_unlocks_the_order_without_the_return_page(hooked):
+    sid, ids, order = open_order(hooked)
+    payload, sig = signed(checkout_event(order["checkout_id"], sid, amount=order["amount"]))
+    status, _, body = webhook(hooked, payload, sig)
+    assert status == 200 and json.loads(body)["unlocked"] is True
+    assert hooked.sessions.get(sid).paid_songs == sorted(int(i) for i in ids)
+    assert text(hooked, f"/s/{sid}/fixes")[0] == 200
+
+
+def test_async_payment_unlocks_only_when_it_succeeds(hooked):
+    sid, _, order = open_order(hooked)
+    payload, sig = signed(checkout_event(order["checkout_id"], sid, paid=False, amount=order["amount"]))
+    assert json.loads(webhook(hooked, payload, sig)[2])["unlocked"] is False  # completed, but still unpaid
+    assert hooked.sessions.get(sid).paid_songs == []
+    payload, sig = signed(checkout_event(order["checkout_id"], sid, amount=order["amount"], n=2,
+                                         kind="checkout.session.async_payment_succeeded"))
+    assert json.loads(webhook(hooked, payload, sig)[2])["unlocked"] is True
+
+
+def test_a_duplicate_webhook_is_harmless(hooked):
+    sid, ids, order = open_order(hooked)
+    payload, sig = signed(checkout_event(order["checkout_id"], sid, amount=order["amount"]))
+    webhook(hooked, payload, sig)
+    status, _, body = webhook(hooked, payload, sig)  # Stripe retries; the same event again
+    assert status == 200 and json.loads(body)["unlocked"] is False
+    assert hooked.sessions.get(sid).paid_songs == sorted(int(i) for i in ids)
+    # and the return page after the webhook just goes to the fixes
+    status, headers, _ = call(hooked, f"/s/{sid}/paid?checkout_session_id={order['checkout_id']}")
+    assert status == 303 and headers["Location"].endswith("/fixes")
+
+
+def test_webhook_for_an_expired_session_is_acknowledged_and_stores_nothing(hooked):
+    gone = "x" * 22  # a session id that no longer exists
+    before = list(hooked.sessions.root.iterdir())
+    payload, sig = signed(checkout_event("cs_test_old", gone, amount=500))
+    status, _, body = webhook(hooked, payload, sig)
+    assert status == 200 and json.loads(body) == {"received": True}
+    assert list(hooked.sessions.root.iterdir()) == before  # nothing created or stored
+    assert hooked.logs == ["Stripe webhook: checkout.session.completed for a Retrack session that's "
+                           "already deleted (1 so far)."]  # the type and a count, nothing else
+
+
+@pytest.mark.parametrize("wrong", ["amount", "other_session", "other_checkout"])
+def test_a_mismatched_webhook_unlocks_nothing(hooked, wrong):
+    sid, _, order = open_order(hooked)
+    other_sid, _, _ = open_order(hooked)
+    event = {"amount": checkout_event(order["checkout_id"], sid, amount=order["amount"] - 100),
+             "other_session": checkout_event(order["checkout_id"], other_sid, amount=order["amount"]),
+             "other_checkout": checkout_event("cs_test_999", sid, amount=order["amount"])}[wrong]
+    payload, sig = signed(event)
+    status, _, body = webhook(hooked, payload, sig)
+    assert status == 200 and json.loads(body)["unlocked"] is False
+    assert hooked.sessions.get(sid).paid_songs == [] and hooked.sessions.get(other_sid).paid_songs == []
+
+
+def test_other_event_types_are_acknowledged_and_ignored(hooked):
+    payload, sig = signed({"id": "evt_9", "object": "event", "type": "customer.created",
+                           "data": {"object": {"id": "cus_1", "object": "customer"}}})
+    status, _, body = webhook(hooked, payload, sig)
+    assert status == 200 and json.loads(body)["ignored"] is True
+
+
+def test_only_the_webhook_skips_the_origin_check(hooked):
+    sid, _, order = open_order(hooked)
+    payload, sig = signed(checkout_event(order["checkout_id"], sid, amount=order["amount"]))
+    # the webhook doesn't care about Origin (Stripe isn't a browser): the signature protects it
+    assert webhook(hooked, payload, sig, origin="https://some-other-site.example")[0] == 200
+    # every other POST still needs this page as its origin, look-alike paths included
+    for path in ("/stripe/webhook/", "/stripe/webhooks", f"/s/{sid}/pay", f"/s/{sid}/delete", "/upload"):
+        assert call(hooked, path, b"", "application/x-www-form-urlencoded",
+                    {"Origin": "https://some-other-site.example"})[0] == 403, path
+
+
+# ---- --mock-mlc: sample data, real Stripe test checkout --------------------------------------------
+
+def run_main(monkeypatch, argv):
+    """Run web.main up to the point it would serve, and hand back the server it built."""
+    seen = {}
+
+    def fake_run(server, open_browser):
+        seen["server"] = server
+        return 0
+
+    monkeypatch.setattr(web, "run_until_stopped", fake_run)
+    code = web.main(argv + ["--port", "0"], open_browser=None)
+    return code, seen.get("server")
+
+
+def test_mock_mlc_uses_stripe_when_test_keys_are_set(monkeypatch, tmp_path):
+    monkeypatch.setattr("retrack.sessions.DEFAULT_ROOT", tmp_path / "root")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+    code, server = run_main(monkeypatch, ["--mock-mlc"])
+    assert code == 0 and server.payments.mode == TEST  # real Stripe test checkout (no API call made here)
+    assert isinstance(server.payments, StripePayments)
+
+
+def test_mock_mlc_shows_the_banner_and_stripe_on_the_pay_step(monkeypatch, tmp_path):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+    payments, fake = fake_stripe()
+    monkeypatch.setattr(web, "payments_from_env", lambda env, mock=False: payments if not mock else DemoPayments())
+    started = {}
+
+    def fake_run(server, open_browser):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            sid, ids = ready_to_pay(server)
+            started["pages"] = [text(server, "/")[1], text(server, f"/s/{sid}/results")[1],
+                                text(server, f"/s/{sid}/fix", data=form([("song", i) for i in ids])[0],
+                                     content_type="application/x-www-form-urlencoded")[1]]
+            started["pay"] = pay(server, sid, ids)
+        finally:
+            server.shutdown()
+        return 0
+
+    monkeypatch.setattr("retrack.sessions.DEFAULT_ROOT", tmp_path / "root")
+    monkeypatch.setattr(web, "run_until_stopped", fake_run)
+    assert web.main(["--mock-mlc", "--port", "0"], open_browser=None) == 0
+    for page in started["pages"]:
+        assert "Sample data, not real results." in page
+    assert TEST_BANNER in started["pages"][2] and "Pay and see your fixes" in started["pages"][2]
+    status, headers, _ = started["pay"]
+    assert status == 303 and headers["Location"].startswith("https://checkout.stripe.test/")
+    assert len(fake.created) == 1
+
+
+def test_mock_mlc_without_keys_is_demo_and_mock_stays_demo(monkeypatch, tmp_path):
+    monkeypatch.setattr("retrack.sessions.DEFAULT_ROOT", tmp_path / "root")
+    assert run_main(monkeypatch, ["--mock-mlc"])[1].payments.mode == DEMO
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc")
+    assert run_main(monkeypatch, ["--mock"])[1].payments.mode == DEMO  # --mock: fully offline, as before
+
+
+def test_mock_mlc_still_refuses_a_live_key(monkeypatch, capsys):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc")
+    assert web.main(["--mock-mlc", "--port", "0"], open_browser=None) == 1
+    assert "RETRACK_PAYMENTS_LIVE=1" in capsys.readouterr().err

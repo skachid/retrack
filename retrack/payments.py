@@ -17,11 +17,10 @@ Three modes:
 Keys come only from the environment (STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY)
 and are never printed, logged or put in an error message.
 
-Before Retrack runs on a public server, add a Stripe webhook handler
-(checkout.session.completed and checkout.session.async_payment_succeeded):
-customers don't always come back to the return page. Locally, web.py
-re-checks the stored Checkout Session whenever the results or fixes page
-loads, which covers a lost redirect.
+Stripe also tells Retrack directly, with a signed webhook (POST
+/stripe/webhook, checked with STRIPE_WEBHOOK_SECRET): customers don't always
+come back to the return page. The return page and web.py's _sync_order()
+stay as backups.
 """
 
 from dataclasses import dataclass
@@ -40,6 +39,38 @@ class PaymentConfigError(Exception):
 
 class PaymentError(Exception):
     """Stripe didn't answer or refused a request. Shown to the user in plain words."""
+
+
+class WebhookError(Exception):
+    """A webhook request we won't act on: unsigned, badly signed, or not set up."""
+
+
+# The events that can mean "paid". async_payment_succeeded covers payment methods that
+# settle later: their checkout.session.completed arrives while still unpaid.
+WEBHOOK_EVENTS = ("checkout.session.completed", "checkout.session.async_payment_succeeded")
+
+
+def verify_webhook(payload, signature, secret):
+    """Check Stripe's signature on a webhook and return the event. Raises WebhookError.
+
+    The signature (the Stripe-Signature header) is an HMAC of the raw body made with
+    the webhook secret, plus a timestamp so an old request can't be replayed. Only
+    Stripe and this computer know the secret, so a valid signature means Stripe sent it.
+    """
+    if not secret:
+        raise WebhookError("STRIPE_WEBHOOK_SECRET isn't set, so no webhook can be trusted.")
+    if not signature:
+        raise WebhookError("Unsigned request.")
+    import stripe
+    try:
+        return stripe.Webhook.construct_event(payload, signature, secret)
+    except Exception:  # a bad signature, a stale timestamp or a broken body: all just "no"
+        raise WebhookError("Bad signature.") from None
+
+
+def checkout_from_event(event):
+    """(event type, Checkout) for a Checkout Session event."""
+    return event.type, _checkout(event.data.object)
 
 
 @dataclass

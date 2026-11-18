@@ -122,6 +122,19 @@
       b.hidden = false;
       b.addEventListener("click", function () { window.print(); });
     });
+    // Keep "About 47 minutes left." current. The server writes the words; this only asks again.
+    fixes.querySelectorAll("[data-time-left-url]").forEach(function (el) {
+      var refresh = function () {
+        fetch(el.getAttribute("data-time-left-url"), { cache: "no-store" })
+          .then(function (r) {
+            if (!r.ok) { leavingOnPurpose = true; window.location.reload(); return null; } // expired: show why
+            return r.json();
+          })
+          .then(function (t) { if (t) el.textContent = t.text; })
+          .catch(function () {});
+      };
+      setInterval(refresh, 30000);
+    });
     var leavingOnPurpose = false;
     fixes.addEventListener("click", function (e) {
       if (e.target.closest("[data-no-warn]")) {

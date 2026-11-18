@@ -104,6 +104,10 @@ class SessionStore:
         with self._lock:
             return self._sessions.get(session_id)
 
+    def seconds_left(self, session):
+        """How long until this session's files are deleted."""
+        return max(0, int(self.lifetime - (self.clock() - session.created_at)))
+
     def expired(self, session_id):
         """True if this session was deleted because its 60 minutes ran out."""
         return session_id in self._expired

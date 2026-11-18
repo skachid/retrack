@@ -20,7 +20,10 @@ The flow, one page per step (pages are built in web_pages.py):
   GET  /s/<id>/fixes            the on-screen fix pack (paid songs only)
   GET  /s/<id>/fixes.xlsx       Retrack_Fixes_YYYYMMDD.xlsx; also bulk_match.csv and, after
   POST /s/<id>/template         an uploaded MLC template, bulk_work_registration.xlsx
+  GET  /s/<id>/time_left        how long the fix page has left (the page's script asks)
   GET  /privacy                 what leaves this computer, and how payments work
+  POST /stripe/webhook          Stripe says a checkout was paid (signed; the only POST without
+                                the Origin check, because Stripe isn't a browser)
   POST /s/<id>/delete           "Delete my files now"
   GET  /s/<id>/report.html, /s/<id>/import_problems.csv, /template.csv  downloads
 
@@ -57,7 +60,8 @@ from .env import load_env
 from .fixes import (FIX_PRICE_USD, FixPackError, bulk_match_name, confirm, fix_kind, fixes_workbook_name,
                     open_template, plan_fixes, split_for_template, total_price, write_bulk_match,
                     write_fixes_workbook, write_template_copy)
-from .payments import DEMO, LIVE, TEST, PaymentConfigError, PaymentError, payments_from_env
+from .payments import (DEMO, LIVE, TEST, WEBHOOK_EVENTS, PaymentConfigError, PaymentError, WebhookError,
+                       checkout_from_event, payments_from_env, verify_webhook)
 from .importer import (FIELDS, REQUIRED, CatalogImportError, FieldMap, HeaderRuleMapper, clean_mapping,
                        convert, read_table, sample_rows, write_catalog, write_problems)
 from .mlc_client import MLCAuthError, MLCClient, MLCError, MockClient
@@ -75,7 +79,9 @@ XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 EXPIRED_TEXT = "Your files were deleted for your privacy. Please upload again."
 SESSION_PATH = re.compile(r"^/s/([A-Za-z0-9_-]{22})/(columns|check|scan|recheck|progress|status|results|fix|pay|paid|"
                           r"fixes|fixes\.xlsx|bulk_match\.csv|template|bulk_work_registration\.xlsx|"
-                          r"delete|report\.html|import_problems\.csv)$")
+                          r"delete|time_left|report\.html|import_problems\.csv)$")
+WEBHOOK_PATH = "/stripe/webhook"
+MAX_WEBHOOK_BYTES = 1_000_000
 
 
 class UploadError(Exception):
@@ -199,14 +205,39 @@ def run_scan(session, make_client, name_matcher, work_searcher):
                      f"restart Retrack. ({type(e).__name__})")
 
 
+# ---- Paid or not: one test, used by the return page, _sync_order() and the webhook ----------
+
+def order_is_paid(session, checkout):
+    """The only test for "paid": Stripe says so, about the order we created for this session.
+
+    Every part must match what Retrack stored when it created the checkout: the
+    Checkout Session id, our session id (client_reference_id), "paid", and the amount.
+    """
+    order = session.order
+    return (order is not None and checkout.id == order["checkout_id"]
+            and checkout.client_reference_id == session.id
+            and checkout.payment_status == "paid"
+            and checkout.amount_total == order["amount"])
+
+
+def mark_paid(session, songs):
+    """Unlock these songs. Doing it twice changes nothing (idempotent)."""
+    session.paid_songs = sorted(set(session.paid_songs) | set(songs))
+    session.order = None
+
+
 # ---- The server ------------------------------------------------------------------------------
 
 class Config:
     """Everything the handler needs, passed in (dependency injection), so tests can
     swap the MLC and Claude for fakes."""
 
-    def __init__(self, make_client, mock, sessions, make_name_matcher, make_work_searcher, payments):
+    def __init__(self, make_client, mock, sessions, make_name_matcher, make_work_searcher, payments,
+                 webhook_secret="", log=None):
         self.payments = payments  # payments.StripePayments or DemoPayments
+        self.webhook_secret = webhook_secret  # STRIPE_WEBHOOK_SECRET: checks Stripe's signature
+        self.log = log or (lambda line: print(line, file=sys.stderr))  # event types and counts only
+        self.deleted_session_events = 0
         self.make_client = make_client
         self.mock = mock
         self.sessions = sessions
@@ -291,6 +322,10 @@ def make_handler(config):
 
         def do_POST(self):
             url = urlsplit(self.path)
+            if url.path == WEBHOOK_PATH:
+                # Stripe's servers aren't a browser and send no Origin header, so this one route
+                # skips the Origin check. Its protection is the signature check instead.
+                return self.post_stripe_webhook()
             if self._from_another_site():
                 return self.send_error(403, "Only the Retrack page itself can send this.")
             try:
@@ -482,18 +517,6 @@ def make_handler(config):
             host = self.headers.get("Host", "")
             return f"http://{host}" if host in (f"localhost:{port}", f"127.0.0.1:{port}") else f"http://localhost:{port}"
 
-        def _mark_paid(self, session, songs):
-            session.paid_songs = sorted(set(session.paid_songs) | set(songs))
-            session.order = None
-
-        def _verified(self, session, checkout):
-            """The only test for "paid": Stripe says so, about the order we created for this session."""
-            order = session.order
-            return (order is not None and checkout.id == order["checkout_id"]
-                    and checkout.client_reference_id == session.id
-                    and checkout.payment_status == "paid"
-                    and checkout.amount_total == order["amount"])
-
         def _sync_order(self, session):
             """If an order is open, ask Stripe about it (covers a customer who paid but never
             made it back to the return page). Quietly does nothing if Stripe doesn't answer."""
@@ -503,8 +526,8 @@ def make_handler(config):
                 checkout = config.payments.retrieve(session.order["checkout_id"])
             except PaymentError:
                 return
-            if self._verified(session, checkout):
-                self._mark_paid(session, session.order["songs"])
+            if order_is_paid(session, checkout):
+                mark_paid(session, session.order["songs"])
 
         def post_fix(self, session):
             if session.state != "done":
@@ -536,7 +559,7 @@ def make_handler(config):
             session.attestation = confirm("ticked the confirmation box on the Retrack page")
 
             if config.payments.mode == DEMO:
-                self._mark_paid(session, chosen)
+                mark_paid(session, chosen)
                 return self._redirect(f"/s/{session.id}/fixes")
 
             amount = round(total_price(plan.songs) * 100)  # in cents, for checking Stripe's total
@@ -544,8 +567,8 @@ def make_handler(config):
             try:
                 if order is not None:
                     checkout = config.payments.retrieve(order["checkout_id"])
-                    if self._verified(session, checkout):  # already paid in another tab
-                        self._mark_paid(session, order["songs"])
+                    if order_is_paid(session, checkout):  # already paid in another tab
+                        mark_paid(session, order["songs"])
                         return self._redirect(f"/s/{session.id}/fixes")
                     if order["songs"] == chosen and checkout.status == "open":
                         return self._redirect(checkout.url)  # the same order: reuse it, never a second charge
@@ -583,8 +606,8 @@ def make_handler(config):
                 return self._send(502, pages.error_page(
                     "Stripe didn’t answer", "If you paid, your payment is safe. Reload this page in a minute.",
                     mock, step="fix"))
-            if self._verified(session, checkout):
-                self._mark_paid(session, order["songs"])
+            if order_is_paid(session, checkout):
+                mark_paid(session, order["songs"])
                 return self._redirect(f"/s/{session.id}/fixes")
             if checkout.client_reference_id != session.id or checkout.id != order["checkout_id"]:
                 return self._send(400, pages.error_page(
@@ -601,11 +624,50 @@ def make_handler(config):
                 mock, step="fix", action=f'<a class="btn" href="/s/{session.id}/results">Back to the results</a>'))
             return True
 
+        # -- Stripe webhook --
+        def _json(self, status, data):
+            self._send(status, json.dumps(data), "application/json")
+
+        def post_stripe_webhook(self):
+            """Stripe tells us a checkout was paid. Same checks as the return page; safe to repeat."""
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_WEBHOOK_BYTES:
+                self.close_connection = True
+                return self._json(413, {"error": "too large"})
+            payload = self.rfile.read(length)  # the raw bytes: the signature is over exactly these
+            try:
+                event = verify_webhook(payload, self.headers.get("Stripe-Signature"), config.webhook_secret)
+            except WebhookError as e:
+                return self._json(400, {"error": str(e)})
+            if event.type not in WEBHOOK_EVENTS:
+                return self._json(200, {"received": True, "ignored": True})
+            event_type, checkout = checkout_from_event(event)
+            session = config.sessions.get(checkout.client_reference_id)
+            if session is None:
+                # Its 60 minutes are up and its files are gone. Acknowledge, so Stripe stops
+                # retrying, and log only the event type and a count: never any catalog data.
+                config.deleted_session_events += 1
+                config.log(f"Stripe webhook: {event_type} for a Retrack session that's already deleted "
+                           f"({config.deleted_session_events} so far).")
+                return self._json(200, {"received": True})
+            if order_is_paid(session, checkout):
+                mark_paid(session, session.order["songs"])
+                return self._json(200, {"received": True, "unlocked": True})
+            # Already unlocked (a repeat), or it doesn't match the order we stored: unlock nothing.
+            # 200 either way, so Stripe doesn't retry something that will never match.
+            return self._json(200, {"received": True, "unlocked": False})
+
+        def get_time_left(self, session):
+            seconds = config.sessions.seconds_left(session)
+            self._json(200, {"seconds": seconds, "text": pages.time_left_text(seconds)})
+
         def get_fixes(self, session):
             self._sync_order(session)
             if self._need_paid(session):
                 return
-            self._send(200, pages.fixes_page(session, self._paid_plan(session), mock, session.template_note))
+            self._send(200, pages.fixes_page(session, self._paid_plan(session), mock, session.template_note,
+                                             seconds_left=config.sessions.seconds_left(session),
+                                             lifetime=config.sessions.lifetime))
 
         def get_fixes_xlsx(self, session):
             if self._need_paid(session):
@@ -644,7 +706,9 @@ def make_handler(config):
                                        "has no column for it, so there’s nothing safe to put in it.")
                 write_template_copy(template, to_fill, session.folder / "bulk_work_registration.xlsx")
             except FixPackError as e:
-                return self._send(400, pages.fixes_page(session, plan, mock, error=(
+                return self._send(400, pages.fixes_page(session, plan, mock,
+                                                        seconds_left=config.sessions.seconds_left(session),
+                                                        lifetime=config.sessions.lifetime, error=(
                     "Retrack couldn’t use that template", f"{e} Your fixes above are unchanged.")))
             finally:
                 template.unlink(missing_ok=True)  # only the filled copy is kept
@@ -675,7 +739,7 @@ def make_handler(config):
 
 
 def start_server(make_client, mock=False, host=HOST, port=PORT, sessions=None,
-                 make_name_matcher=None, make_work_searcher=None, payments=None):
+                 make_name_matcher=None, make_work_searcher=None, payments=None, webhook_secret=None, log=None):
     """Open the port and return the server (not running yet). port=0 picks any free port.
 
     The server always listens on `host`, which defaults to 127.0.0.1 (this computer only).
@@ -687,7 +751,10 @@ def start_server(make_client, mock=False, host=HOST, port=PORT, sessions=None,
         make_work_searcher = MockWorkSearcher if mock else ClaudeWorkSearcher
     if payments is None:
         payments = payments_from_env(os.environ, mock)  # raises PaymentConfigError for an unsafe key
-    config = Config(make_client, mock, sessions, make_name_matcher, make_work_searcher, payments)
+    if webhook_secret is None:
+        webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+    config = Config(make_client, mock, sessions, make_name_matcher, make_work_searcher, payments,
+                    webhook_secret, log)
     server = ThreadingHTTPServer((host, port), make_handler(config))
     server.sessions = sessions
     server.payments = payments
@@ -706,12 +773,17 @@ def _start_sweeper(sessions, every=60):
 
 def main(argv=None, open_browser=webbrowser.open):
     parser = argparse.ArgumentParser(description="Run the Retrack web UI on this computer.")
-    parser.add_argument("--mock", action="store_true", help="sample data from fixtures/: nothing leaves this computer")
+    data = parser.add_mutually_exclusive_group()
+    data.add_argument("--mock", action="store_true",
+                      help="sample data and demo payments: fully offline, nothing leaves this computer")
+    data.add_argument("--mock-mlc", action="store_true",
+                      help="sample MLC data and offline AI, but real Stripe test checkout when Stripe "
+                           "test keys are set (to try payments before you have MLC access)")
     parser.add_argument("--port", type=int, default=PORT, help=f"port to use (default: {PORT})")
     args = parser.parse_args(argv)
     load_env()  # .env in this folder, if there is one: no need to export variables by hand
 
-    if args.mock:
+    if args.mock or args.mock_mlc:
         make_client = MockClient
     else:
         try:
@@ -722,7 +794,10 @@ def main(argv=None, open_browser=webbrowser.open):
         make_client = MLCClient
 
     try:
-        server = start_server(make_client, args.mock, port=args.port)
+        # --mock-mlc: the data side is sample data (mock=True: fake MLC, offline AI, the banner),
+        # but payments come from the environment like a real run (still refusing live keys).
+        payments = payments_from_env(os.environ, mock=False) if args.mock_mlc else None
+        server = start_server(make_client, args.mock or args.mock_mlc, port=args.port, payments=payments)
     except PaymentConfigError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
@@ -731,6 +806,10 @@ def main(argv=None, open_browser=webbrowser.open):
         return 1
     if server.payments.mode == TEST:
         print("Payments: Stripe test mode (no real money).")
+        if not os.environ.get("STRIPE_WEBHOOK_SECRET"):
+            print("Tip: set STRIPE_WEBHOOK_SECRET so Stripe can confirm payments directly (see the README).")
+    elif args.mock_mlc:
+        print("Payments: no Stripe test keys found, so the pay button is Pay (demo).")
     elif server.payments.mode == LIVE:
         print("Payments: Stripe LIVE mode. Real cards will be charged.")
     previous = stop_on_signals()
