@@ -183,6 +183,10 @@ class StripePayments:
             "success_url": success_url,
             "cancel_url": cancel_url,
             "metadata": {"retrack_session": reference},
+            # Managed Payments (Stripe as merchant of record, adding tax) is on by default on
+            # new accounts and needs a product tax code. It's off here, so the customer pays
+            # exactly quantity × price and the amount_total check in web.py stays exact.
+            "managed_payments": {"enabled": False},
             "integration_identifier": INTEGRATION_ID,
         }
         try:

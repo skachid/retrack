@@ -123,6 +123,8 @@ def test_one_checkout_session_per_order_with_quantity_n():
     assert params["mode"] == "payment" and params["client_reference_id"] == "R"
     assert "payment_method_types" not in params  # Stripe shows the methods enabled in the Dashboard
     assert "customer" not in params  # guest checkout, no accounts
+    # Managed Payments off: Stripe would otherwise demand a tax code and could add tax on top
+    assert params["managed_payments"] == {"enabled": False}
     assert options == {"idempotency_key": "k1"}
 
 
