@@ -33,10 +33,15 @@ class FakeSessions:
     def __init__(self):
         self.created, self.expired, self.store, self.keys = [], [], {}, {}
         self.fail = False
+        self.reject = False  # Stripe understood the request and said no
 
     def create(self, params=None, options=None):
         if self.fail:
             raise ConnectionError("network down, key sk_test_SECRET")
+        if self.reject:
+            import stripe
+            raise stripe.InvalidRequestError("Invalid integer: abc (key sk_test_SECRET)",
+                                             "line_items[0][price_data][unit_amount]", code="parameter_invalid")
         key = (options or {}).get("idempotency_key")
         if key in self.keys:  # like Stripe: the same idempotency key returns the same session
             return self.store[self.keys[key]]
@@ -64,10 +69,10 @@ class FakeSessions:
         s.status, s.payment_status = "complete", "paid"
 
 
-def fake_stripe():
+def fake_stripe(log=None):
     sessions = FakeSessions()
     client = SimpleNamespace(v1=SimpleNamespace(checkout=SimpleNamespace(sessions=sessions)))
-    return StripePayments("sk_test_SECRET", TEST, client=client), sessions
+    return StripePayments("sk_test_SECRET", TEST, client=client, log=log), sessions
 
 
 # ---- Choosing the mode from the environment -------------------------------------------------
@@ -131,6 +136,33 @@ def test_keys_never_show_in_errors_or_logs():
     assert "SECRET" not in str(err.value) and "sk_test" not in str(err.value)
 
 
+def test_rejected_request_logs_stripes_details_but_no_key():
+    lines = []
+    payments, sessions = fake_stripe(log=lines.append)
+    sessions.reject = True
+    with pytest.raises(payments_mod.PaymentError) as err:
+        payments.create_checkout(reference="R", quantity=1, unit_amount_cents=500, success_url="s",
+                                 cancel_url="c", idempotency_key="k")
+    assert err.value.retry is False  # pressing again won't help
+    assert str(err.value) == "Stripe rejected the payment setup."
+    assert len(lines) == 1
+    line = lines[0]
+    assert "InvalidRequestError" in line and "code=parameter_invalid" in line
+    assert "param=line_items[0][price_data][unit_amount]" in line and "Invalid integer: abc" in line
+    assert "SECRET" not in line and "sk_test" not in line
+
+
+def test_network_error_can_be_retried_and_is_logged():
+    lines = []
+    payments, sessions = fake_stripe(log=lines.append)
+    sessions.fail = True
+    with pytest.raises(payments_mod.PaymentError) as err:
+        payments.create_checkout(reference="R", quantity=1, unit_amount_cents=500, success_url="s",
+                                 cancel_url="c", idempotency_key="k")
+    assert err.value.retry is True
+    assert len(lines) == 1 and "ConnectionError" in lines[0] and "sk_test" not in lines[0]
+
+
 def test_retrack_never_handles_card_numbers():
     for name in ("payments.py", "web.py", "web_pages.py"):
         src = (ROOT / "retrack" / name).read_text().lower()
@@ -177,6 +209,23 @@ def test_pay_redirects_to_stripe_checkout(stripe_server):
     assert params["line_items"][0]["price_data"]["unit_amount"] == round(FIX_PRICE_USD * 100)
     assert params["success_url"].endswith(f"/s/{sid}/paid?checkout_session_id={{CHECKOUT_SESSION_ID}}")
     assert params["cancel_url"].endswith(f"/s/{sid}/results?checkout=canceled")
+
+
+def test_rejected_payment_setup_says_so_and_not_to_retry(tmp_path):
+    lines = []
+    payments, sessions = fake_stripe(log=lines.append)
+    srv = start(tmp_path, payments)
+    try:
+        sid, ids = ready_to_pay(srv)
+        sessions.reject = True
+        status, _, body = pay(srv, sid, ids)
+        page = body.decode()
+        assert status == 502
+        assert "Stripe rejected the payment setup. Nothing was charged." in page
+        assert "press the button again" not in page
+        assert lines and "code=parameter_invalid" in lines[0]
+    finally:
+        srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
 
 def test_test_mode_banner_on_the_pay_step(stripe_server):

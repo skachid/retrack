@@ -23,6 +23,8 @@ come back to the return page. The return page and web.py's _sync_order()
 stay as backups.
 """
 
+import re
+import sys
 from dataclasses import dataclass
 
 DEMO, TEST, LIVE = "demo", "test", "live"
@@ -38,7 +40,28 @@ class PaymentConfigError(Exception):
 
 
 class PaymentError(Exception):
-    """Stripe didn't answer or refused a request. Shown to the user in plain words."""
+    """Stripe didn't answer or refused a request. Shown to the user in plain words.
+
+    retry=False means Stripe rejected the request itself (InvalidRequestError), so
+    pressing the button again would only get the same "no".
+    """
+
+    def __init__(self, message, retry=True):
+        super().__init__(message)
+        self.retry = retry
+
+
+# Anything shaped like a Stripe key or webhook secret. Stripe's error messages don't
+# contain keys, but this makes sure a log line never can.
+_KEY_PATTERN = re.compile(r"\b(sk|rk|pk|whsec)_[A-Za-z0-9_*]+")
+
+
+def _redact(text):
+    return _KEY_PATTERN.sub("[key removed]", str(text))
+
+
+def _print_to_terminal(line):
+    print(line, file=sys.stderr)
 
 
 class WebhookError(Exception):
@@ -118,13 +141,31 @@ class DemoPayments:
 
 
 class StripePayments:
-    def __init__(self, secret_key, mode, client=None):
+    def __init__(self, secret_key, mode, client=None, log=None):
         if client is None:
             import stripe  # imported here so demo mode works without the stripe package
 
             client = stripe.StripeClient(secret_key)
         self._client = client  # holds the key; this object never shows it
         self.mode = mode
+        self.log = log or _print_to_terminal  # injected so tests can read what was logged
+
+    def _failed(self, action, e):
+        """Turn a Stripe exception into a PaymentError, and log what Stripe said.
+
+        Stripe's errors carry a code (e.g. "parameter_invalid"), the param it didn't
+        like (e.g. "line_items[0][price_data][unit_amount]") and a message. Those
+        describe our request, never the key or the catalog (we send Stripe no catalog
+        data), so they're safe to log and are what you need to fix the request.
+        """
+        code = getattr(e, "code", None)
+        param = getattr(e, "param", None)
+        message = getattr(e, "user_message", None) or str(e)
+        self.log(_redact(f"Stripe error while {action}: {type(e).__name__} "
+                         f"code={code or '-'} param={param or '-'} message={message or '-'}"))
+        if _is_invalid_request(e):
+            return PaymentError("Stripe rejected the payment setup.", retry=False)
+        return PaymentError(f"Stripe didn’t answer ({type(e).__name__}).")
 
     def __repr__(self):
         return f"StripePayments(mode={self.mode!r})"  # no key in logs or tracebacks
@@ -149,15 +190,15 @@ class StripePayments:
             # instead of creating (and charging for) a second one.
             session = self._client.v1.checkout.sessions.create(
                 params=params, options={"idempotency_key": idempotency_key})
-        except Exception as e:  # network, bad key, Stripe outage: never echo details that could hold a key
-            raise PaymentError(f"Stripe didn’t accept the request ({type(e).__name__}).") from None
+        except Exception as e:  # network, bad key, Stripe outage, a rejected request
+            raise self._failed("creating a checkout", e) from None
         return _checkout(session)
 
     def retrieve(self, checkout_id):
         try:
             return _checkout(self._client.v1.checkout.sessions.retrieve(checkout_id))
         except Exception as e:
-            raise PaymentError(f"Stripe didn’t answer ({type(e).__name__}).") from None
+            raise self._failed("looking up a checkout", e) from None
 
 
     def expire(self, checkout_id):
@@ -166,6 +207,15 @@ class StripePayments:
             self._client.v1.checkout.sessions.expire(checkout_id)
         except Exception:
             pass  # already completed or expired: nothing to close
+
+
+def _is_invalid_request(e):
+    """True for stripe.InvalidRequestError (Stripe understood us and said no)."""
+    try:
+        import stripe
+    except ImportError:
+        return False
+    return isinstance(e, stripe.InvalidRequestError)
 
 
 def _checkout(s):

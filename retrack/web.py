@@ -582,8 +582,13 @@ def make_handler(config):
                     cancel_url=f"{base}/s/{session.id}/results?checkout=canceled",
                     idempotency_key=f"retrack-{session.id}-order-{session.orders_placed}")
             except PaymentError as e:
-                return self._send(502, pages.pay_page(session, plan, chosen, mock, config.payments.mode, error=(
-                    "Stripe didn’t answer", f"Nothing was charged. Wait a minute and press the button again. ({e})")))
+                if e.retry:  # a network blip or an outage: trying again can work
+                    error = ("Stripe didn’t answer",
+                             f"Nothing was charged. Wait a minute and press the button again. ({e})")
+                else:  # Stripe said no to the request itself: retrying gets the same answer
+                    error = ("Stripe rejected the payment setup", "Stripe rejected the payment setup. "
+                             "Nothing was charged. The details are in the terminal where Retrack is running.")
+                return self._send(502, pages.pay_page(session, plan, chosen, mock, config.payments.mode, error=error))
             session.order = {"songs": chosen, "checkout_id": checkout.id, "url": checkout.url, "amount": amount}
             self._redirect(checkout.url)
 
