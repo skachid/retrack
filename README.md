@@ -78,6 +78,7 @@ Run the tests: `pytest`. They never read your `.env` and never call Stripe.
 |---|---|---|
 | `MLC_USERNAME`, `MLC_PASSWORD` | Your Public Search API login from The MLC | For real checks |
 | `ANTHROPIC_API_KEY` | The AI features (Smart names, AI search, `--smart-import`) | Optional |
+| `RETRACK_AI_DAILY_LIMIT_USD` | The most the web UI's AI checks may cost per day, in dollars (estimated from token counts) | Optional: blank means 5; 0 turns the AI off |
 | `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY` | Taking payment for the fix pack in the web UI | Optional: without them, "Pay (demo)" |
 | `STRIPE_WEBHOOK_SECRET` | Lets Stripe confirm payments directly (`whsec_...`) | Optional, recommended |
 | `RETRACK_PAYMENTS_LIVE` | Set to `1` only to allow a live Stripe key (real money) | Leave blank |
@@ -180,17 +181,18 @@ Your browser opens **http://localhost:8000**, and you go through five steps:
 
 1. **Upload.** Drop in your spreadsheet as it is: a `.csv` or `.xlsx` with any columns (a distributor export, or your own sheet).
 2. **Columns.** Retrack shows which column it read as the title, artist, ISRC and writers (several writer columns are fine), how sure it is, and your first 5 rows. Fix anything it got wrong with the dropdowns.
-3. **Check.** Choose the two optional extra checks. Both are **off by default**, and each says in one sentence what it sends to an AI service (Claude):
-   - **Smart names**: asks whether two writer names are the same person.
-   - **AI search**: looks for songs that are registered but not linked to your ISRC.
+3. **Check.** Choose the two optional extra checks. Both are **off by default**, and each says in one sentence what it sends to an AI service (Claude). They run **only after checkout, and only on the songs you pay for**: the free check never uses the AI.
+   - **Smart names**: asks whether two writer names are the same person (paid songs with a missing writer).
+   - **AI search**: for paid red songs, tells whether each needs registering or is registered but not linked to your ISRC.
    Below them, "What will leave this computer" updates as you switch them on and off. Then press **Start the check** and watch "Checking 37 of 120…", which updates by itself.
 4. **Report.** The red/yellow/green report. **Summary** groups what Retrack found ("1 song is only partly claimed: Paper Crowns"); the other filters show one colour. There are also notes from reading your file. Download it as HTML or print it.
-5. **Fix pack.** Tick the songs to fix and see "N songs × $X = $Total". Confirm that you reviewed the data and control the shares (without the confirmation, nothing is unlocked), then press **Pay and see your fixes**. You pay once for the whole order on Stripe's own checkout page; Retrack never sees your card number. Back on Retrack, the **fix pack page** shows:
+5. **Fix pack.** Tick the songs to fix and see "N songs × $X = $Total". Red songs show as "Needs fixing: we’ll work out exactly how after checkout." and cost the same as any other. Confirm that you reviewed the data and control the shares (without the confirmation, nothing is unlocked), then press **Pay and see your fixes**. You pay once for the whole order on Stripe's own checkout page; Retrack never sees your card number. Back on Retrack, it first says "Working out how to fix song 1 of 3…" while it runs the extra checks you turned on, on the paid songs only. Then the **fix pack page** shows:
    - each paid song, grouped by Register, Link and Claim, with what Retrack filled in, every "You must fill this in" field highlighted, and step-by-step instructions
+   - **Check by hand**, for any red song the extra checks couldn't place (AI search was off, the AI didn't answer, or a spending limit was reached), with the steps to search The MLC yourself
    - **one main download**, `Retrack_Fixes_YYYYMMDD.xlsx`, with Summary, Register, Link, Claim and Confirmation tabs
    - **For submitting to The MLC**, when it applies: the bulk match CSV in The MLC's exact format, and an optional step to upload your own MLC Bulk Work template so Retrack fills a copy
 
-   **Your fixes stay there for 60 minutes**, then your files are deleted for your privacy. The page shows how long is left. Print it (Cmd+P), download it, or screenshot it to keep it. Refreshing the page is safe; your browser also asks before you leave. Red songs that need AI search are listed together above the songs to tick, with a checkbox and a button that checks just those songs again.
+   **Your fixes stay there for 60 minutes**, then your files are deleted for your privacy. The page shows how long is left. Print it (Cmd+P), download it, or screenshot it to keep it. Refreshing the page is safe; your browser also asks before you leave. If AI search was off, the paid red songs are listed together under Check by hand, with a checkbox and a button that works out just those songs (no extra charge).
 
    Without Stripe keys (or with `--mock`), the button is **Pay (demo)**, which skips Stripe and charges nothing, so everything runs locally.
 
@@ -203,7 +205,9 @@ Every error says what went wrong and what to do next: the wrong kind of file, no
 - Stopping Retrack (**Ctrl+C**) deletes everything.
 - If Retrack crashed last time, it clears the leftovers when it starts.
 
-It only answers this computer, it never talks to any website other than The MLC's API (and Claude, if you turn a check on), and it checks up to 500 songs at a time. With `--mock`, every page says **Sample data, not real results**. Use `--port 8001` if 8000 is taken. Everything works with JavaScript turned off too.
+It only answers this computer, it never talks to any website other than The MLC's API (and Claude, if you turn a check on), and it checks up to 500 songs at a time.
+
+**What the AI costs.** Every AI call uses one small model, `claude-haiku-4-5` (`MODEL` in `retrack/ai.py`): these are short yes/no and "which column is which" questions. In the web UI the AI runs only for songs someone has paid for, with two hard limits: at most 5 AI calls per paid song (`MAX_SEARCHES`) for each order, and `RETRACK_AI_DAILY_LIMIT_USD` (default $5) of estimated spend per day for all orders together (counted in memory, so it starts again when Retrack restarts). When a limit is reached the AI is skipped, the song goes to "Check by hand", and nothing crashes. After each order the terminal prints the real token counts and the estimated cost, for example `AI usage for one order (3 songs): 7 calls, 4,210 input + 690 output tokens, about $0.0077. Today: about $0.0412 of $5.00.` It never prints a title, a name or an ISRC. The command line (`--smart-names`, `--ai-search`, `--smart-import`) works as before, with the same model. With `--mock`, every page says **Sample data, not real results**. Use `--port 8001` if 8000 is taken. Everything works with JavaScript turned off too.
 
 ## Read the report in your browser
 
@@ -250,6 +254,7 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 | `retrack/mlc_client.py` | Logs in to The MLC and runs lookups. `MockClient` fakes it using `fixtures/mlc_mock.json`. |
 | `retrack/checker.py` | The rules that decide red/yellow/green and the fix steps. |
 | `retrack/name_matcher.py` | Second-pass name check: `ClaudeNameMatcher` (Claude API) and `MockNameMatcher` (offline rules). |
+| `retrack/ai.py` | The one Claude model (`MODEL`), token prices, and the web UI's AI limits and cost log (`MeteredClient`). |
 | `retrack/work_search.py` | `--ai-search`: searches by title/writers. `ClaudeWorkSearcher` (Claude API) and `MockWorkSearcher` (offline rules). Only suggests; `checker.py` decides. |
 | `retrack/importer.py` | `import`: reads any .csv/.xlsx, maps the columns (offline rules, or Claude with `--smart-import`), cleans the data, writes `catalog.csv` and `import_problems.csv`. |
 | `retrack/fixes.py` | The fix pack: plans which songs get which fix, checks the attestation, fills a copy of your MLC template, writes the other files. |
@@ -267,6 +272,7 @@ catalog.csv ─► checker.py ─► mlc_client.py ─► The MLC API
 | `tests/test_checker.py` | One test per verdict, plus name and ISRC cleanup. |
 | `tests/test_payments.py` | Payments with Stripe faked: unpaid sessions see nothing, tampered return links, one charge per order, live keys refused, demo mode offline, the fix page and its downloads, `.env` loading. |
 | `tests/test_web.py` | The web UI end to end: upload → columns → check → fix pack download, attestation refusal, every error, file deletion, and privacy text that matches what's actually sent. |
+| `tests/test_ai.py` | The one shared model, the per-order and daily AI limits, the cost log, and AI only after checkout for paid songs. |
 | `tests/test_work_search.py` | `--ai-search`: the song-code search, the search limits, both searchers, and the two red cases. |
 | `tests/test_importer.py` | `import`: reading messy files, both mappers, the confirmation step, every cleanup rule, and a test proving only the header + 5 rows reach Claude. |
 | `tests/test_fixes.py` | The fix pack and the compliance rules: no files without attestation, ownership never guessed, one price for every verdict. |

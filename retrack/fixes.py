@@ -47,6 +47,10 @@ from .mlc_client import split_name
 FIX_PRICE_USD = 5.00
 
 REGISTER, LINK, CLAIM = "register", "link", "claim"
+# Web UI only. UNRESOLVED: a red song not placed yet (Register or Link?). It can be paid
+# for; after checkout AI search works it out, and if it can't, the user checks by hand.
+# ALL_SET: a paid song that a closer look (smart names) found nothing wrong with.
+UNRESOLVED, ALL_SET = "unresolved", "all_set"
 
 FIXES_DIR = "fix_pack"
 
@@ -87,10 +91,17 @@ class FixPlan:
     link: list = field(default_factory=list)
     claim: list = field(default_factory=list)
     skipped: list = field(default_factory=list)  # (result, reason) pairs
+    unresolved: list = field(default_factory=list)  # web UI only, see UNRESOLVED
+    all_set: list = field(default_factory=list)     # web UI only, see ALL_SET
 
     @property
     def songs(self):
-        return self.register + self.link + self.claim
+        return self.register + self.link + self.claim + self.unresolved + self.all_set
+
+    def by_kind(self):
+        """(kind, songs) for every kind, in the order the pages show them."""
+        return [(REGISTER, self.register), (LINK, self.link), (CLAIM, self.claim),
+                (UNRESOLVED, self.unresolved), (ALL_SET, self.all_set)]
 
 
 def fix_kind(result):
@@ -104,6 +115,15 @@ def fix_kind(result):
     return None
 
 
+def sold_kind(result):
+    """What the web UI sells for a song: its fix, or UNRESOLVED for a red song that
+    isn't placed yet (worked out after checkout). None: nothing to sell."""
+    kind = fix_kind(result)
+    if kind is None and result.status == RED:
+        return UNRESOLVED
+    return kind
+
+
 def skip_reason(result):
     if result.status == RED:
         # We don't know if it's registered under another title. Registering it
@@ -113,8 +133,14 @@ def skip_reason(result):
     return "nothing to fix"
 
 
-def plan_fixes(results, titles=None):
-    """Sort the chosen songs by kind of fix. titles=None means every fixable song."""
+def plan_fixes(results, titles=None, sell_red=False):
+    """Sort the chosen songs by kind of fix. titles=None means every fixable song.
+
+    sell_red=True is the web UI: a red song that isn't placed yet goes in
+    plan.unresolved instead of being skipped, and a song with nothing to fix in
+    plan.all_set (it was paid for, so it's still shown). The command line leaves
+    it False: there, red songs without --ai-search are skipped, never registered.
+    """
     if titles is not None:
         wanted = {t.strip().lower() for t in titles if t.strip()}
         known = {r.row.title.lower() for r in results}
@@ -126,7 +152,9 @@ def plan_fixes(results, titles=None):
     plan = FixPlan()
     for r in results:
         kind = fix_kind(r)
-        if kind is None:
+        if kind is None and sell_red:
+            (plan.unresolved if r.status == RED else plan.all_set).append(r)
+        elif kind is None:
             if titles is not None or r.status == RED:  # say why, but don't list every green song
                 plan.skipped.append((r, skip_reason(r)))
         else:
@@ -477,12 +505,14 @@ def write_fixes_workbook(plan, attestation, out_path):
     wb.remove(wb.active)
 
     summary = sheet("Summary", ["Song", "Artist", "ISRC", "Fix", "What you get", "Price (USD)"], wb)
-    what = {REGISTER: "Rows for The MLC’s Bulk Work Registration (Register tab)",
-            LINK: "A match to confirm and submit (Link tab)",
-            CLAIM: "Steps to claim in The MLC Portal (Claim tab)"}
-    for r in plan.songs:
-        kind = fix_kind(r)
-        summary.append([r.row.title, r.row.artist, r.row.isrc, kind.capitalize(), what[kind], price_of(r)])
+    what = {REGISTER: ("Register", "Rows for The MLC’s Bulk Work Registration (Register tab)"),
+            LINK: ("Link", "A match to confirm and submit (Link tab)"),
+            CLAIM: ("Claim", "Steps to claim in The MLC Portal (Claim tab)"),
+            UNRESOLVED: ("Check by hand", "Search The MLC by title and writers yourself (steps on the fix page)"),
+            ALL_SET: ("Nothing to fix", "A closer look found nothing wrong")}
+    for kind, songs in plan.by_kind():
+        for r in songs:
+            summary.append([r.row.title, r.row.artist, r.row.isrc, *what[kind], price_of(r)])
     summary.append([])
     summary.append(["Total", price_line(plan.songs)])
     summary.append([])

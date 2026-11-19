@@ -20,7 +20,8 @@ from pathlib import Path
 
 from .checker import GREEN, RED
 from .compliance import ATTESTATION_TEXT, COMPLIANCE_TEXT, NEVER_TEXT
-from .fixes import (CLAIM, FIX_PRICE_USD, LINK, REGISTER, bulk_match_name, fix_kind,
+from .fixes import (ALL_SET, CLAIM, FIX_PRICE_USD, LINK, REGISTER, UNRESOLVED, bulk_match_name, fix_kind,
+                    sold_kind,
                     price_line)
 from .payments import DEMO, DEMO_BANNER, TEST, TEST_BANNER
 from .importer import FIELDS, LOW_CONFIDENCE, REQUIRED, SAMPLE_ROWS, column_letter
@@ -37,14 +38,19 @@ KIND_TEXT = {
     REGISTER: "Register it: rows for The MLC’s Bulk Work Registration template",
     LINK: "Link it: a match file to link your recording to the song",
     CLAIM: "Claim it: a checklist of steps in The MLC Portal",
+    UNRESOLVED: "Needs fixing: we’ll work out exactly how after checkout.",
+    ALL_SET: "Nothing to fix after a closer look",
 }
 # The page says "an AI service", not the provider's name: users need to know it's an
 # outside AI and exactly what it gets (privacy.py), not which one.
-SMART_NAMES_TEXT = ("When a writer’s name doesn’t match exactly, Retrack sends the two writer "
-                    "names to an AI service to ask if they’re the same person.")
-AI_SEARCH_TEXT = ("For red songs and songs with missing writers, Retrack sends the song title and "
-                  "writer names to The MLC’s song search and to an AI service, to find registrations "
-                  "that aren’t linked to your ISRC.")
+SMART_NAMES_TEXT = ("After checkout, for the songs you pay for: when a writer’s name doesn’t match exactly, "
+                    "Retrack sends the two writer names to an AI service to ask if they’re the same person.")
+AI_SEARCH_TEXT = ("After checkout, for the red songs you pay for: Retrack sends the song title and writer "
+                  "names to The MLC’s song search and to an AI service, to tell whether each needs "
+                  "registering or linking.")
+# The same check offered on the fix page, for songs already paid for.
+AI_SEARCH_NOW_TEXT = ("Sends these songs’ titles and writer names to The MLC’s song search and to an AI "
+                      "service, to tell whether each needs registering or linking.")
 MOCK_TOGGLE_TEXT = " In sample data mode an offline stand-in answers instead, so nothing is sent."
 
 
@@ -307,7 +313,8 @@ def check_page(session, mock=False, error=None):
   <section class="flow" aria-labelledby="check-title">
     <div class="container">
       <h1 id="check-title">Check your songs</h1>
-      <p class="lead">{n} {"song is" if n == 1 else "songs are"} ready to check with The MLC.</p>
+      <p class="lead">{n} {"song is" if n == 1 else "songs are"} ready to check with The MLC. The check is free
+      and never uses an AI service; the extra checks run only after checkout, on the songs you pay for.</p>
       {_import_notes(session)}
       {alert(*error) if error else ""}
       <form id="scan-form" class="scan-form" method="post" action="/s/{session.id}/scan">
@@ -330,7 +337,10 @@ def check_page(session, mock=False, error=None):
 def progress_text(session):
     if session.total == 0:
         return "Getting ready…"
-    return f"Checking {min(session.done + 1, session.total)} of {session.total}…"
+    n = min(session.done + 1, session.total)
+    if session.phase == "finish":
+        return f"Working out how to fix song {n} of {session.total}…"
+    return f"Checking {n} of {session.total}…"
 
 
 def progress_page(session, mock=False):
@@ -340,7 +350,7 @@ def progress_page(session, mock=False):
     <div class="container">
       <h1 id="progress-title" data-status-url="/s/{session.id}/status" aria-live="polite">{escape(progress_text(session))}</h1>
       <progress id="progress-bar" max="{max(session.total, 1)}" value="{session.done}">{session.done} of {session.total}</progress>
-      <p class="lead">Retrack is asking The MLC about each song, one at a time. This page updates by itself; keep this window open.</p>
+      <p class="lead">{escape(FINISH_LEAD if session.phase == "finish" else SCAN_LEAD)}</p>
       <section class="privacy" aria-labelledby="privacy-title">
         <h2 id="privacy-title">What is leaving this computer</h2>
         {privacy_list(s["smart_names"], s["ai_search"], mock)}
@@ -348,7 +358,14 @@ def progress_page(session, mock=False):
     </div>
   </section>"""
     refresh = f'<meta http-equiv="refresh" content="2;url=/s/{session.id}/progress">'
+    if session.phase == "finish":
+        return layout("Working out your fixes, Retrack", body, mock, step="fix", head_extra=refresh)
     return layout("Checking your catalog, Retrack", body, mock, step="check", head_extra=refresh)
+
+
+SCAN_LEAD = "Retrack is asking The MLC about each song, one at a time. This page updates by itself; keep this window open."
+FINISH_LEAD = ("Paid, thank you. Retrack is now running the extra checks on the songs you paid for, to work out "
+               "exactly how to fix each one. This page updates by itself; your fixes open when it’s done.")
 
 
 # ---- 4. Report -----------------------------------------------------------------------------
@@ -382,27 +399,21 @@ def _import_notes(session):
     </details>"""
 
 
-def _needs_search(session, unfixable_red, mock, error=None):
-    """Red songs fix_kind() can't place yet: AI search tells "register" from "link"."""
-    n = len(unfixable_red)
-    songs = "".join(f'<li><span class="title">{escape(r.row.title)}</span> '
-                    f'<span class="artist">{escape(r.row.artist)}</span></li>' for r in unfixable_red)
-    if session.settings["ai_search"]:
-        head = f"{n} {'song' if n == 1 else 'songs'} couldn’t be searched fully"
-        why = ("The title search didn’t finish for these (The MLC or the AI service didn’t answer), so "
-               "Retrack can’t yet tell whether they need registering. Try again in a few minutes.")
-    else:
-        head = f"{n} {'song needs' if n == 1 else 'songs need'} AI search first"
-        why = ("Retrack found no match for these ISRCs. AI search tells whether each song needs registering "
-               "or is already registered under another title, since registering it twice creates a duplicate.")
+def _needs_search(session, unresolved, mock, error=None):
+    """Paid red songs AI search was off for: one callout, with the box that is the
+    user's OK to send their titles and writer names, and a button for only those."""
+    n = len(unresolved)
+    head = f"{n} {'song needs' if n == 1 else 'songs need'} AI search to be worked out"
+    why = ("Retrack found no match for these ISRCs. AI search tells whether each song needs registering "
+           "or is already registered under another title, since registering it twice creates a duplicate. "
+           "You’ve paid for these songs, so this costs nothing more.")
     return f"""<div class="needs-search" role="region" aria-labelledby="needs-title">
         <h3 id="needs-title">{head}</h3>
         <p>{why}</p>
-        <ul class="needs-list">{songs}</ul>
         {alert(*error) if error else ""}
         <form method="post" action="/s/{session.id}/recheck">
-          {_switch("recheck-ai", "ai_search", "AI search", AI_SEARCH_TEXT, session.settings["ai_search"], mock, required=True)}
-          <button class="btn btn--quiet" type="submit">Check {"this song" if n == 1 else f"these {n} songs"} again</button>
+          {_switch("recheck-ai", "ai_search", "AI search", AI_SEARCH_NOW_TEXT, False, mock, required=True)}
+          <button class="btn btn--quiet btn--small" type="submit">Work out {"this song" if n == 1 else f"these {n} songs"}</button>
         </form>
       </div>"""
 
@@ -416,12 +427,11 @@ def _paid_rows(session, rows):
             f'<p><a href="/s/{session.id}/fixes">See your fixes</a></p>')
 
 
-def _fix_section(session, error=None, mock=False, recheck_error=None):
+def _fix_section(session, error=None, mock=False):
     paid = set(session.paid_songs)
-    fixable = [(i, r) for i, r in enumerate(session.results) if fix_kind(r) and i not in paid]
+    fixable = [(i, r) for i, r in enumerate(session.results) if sold_kind(r) and i not in paid]
     paid_rows = [r for i, r in enumerate(session.results) if i in paid]
-    unfixable_red = [r for r in session.results if r.status == RED and not fix_kind(r)]
-    if not fixable and not unfixable_red and not paid_rows:
+    if not fixable and not paid_rows:
         return ""
     # Every possible total, worked out by the same price_line() the CLI uses, so the
     # page's script only picks one; it never does the sum itself.
@@ -430,7 +440,7 @@ def _fix_section(session, error=None, mock=False, recheck_error=None):
         f'<li><label class="fix-row"><input type="checkbox" name="song" value="{i}">'
         f'<span class="fix-song"><span class="title">{escape(r.row.title)}</span>'
         f'<span class="artist">{escape(r.row.artist)}</span></span>'
-        f'<span class="fix-kind">{escape(KIND_TEXT[fix_kind(r)])}</span></label></li>'
+        f'<span class="fix-kind">{escape(KIND_TEXT[sold_kind(r)])}</span></label></li>'
         for i, r in fixable)
     form = ""
     if fixable:
@@ -443,7 +453,6 @@ def _fix_section(session, error=None, mock=False, recheck_error=None):
     return f"""<section class="fix" aria-labelledby="fix-title">
       <h2 id="fix-title">Fix pack</h2>
       <p class="lead">Tick the songs you want fixed. You get the files to upload to The MLC yourself.</p>
-      {_needs_search(session, unfixable_red, mock, recheck_error) if unfixable_red else ""}
       {form}
       {_paid_rows(session, paid_rows)}
     </section>"""
@@ -464,7 +473,7 @@ def _paid_link(session):
             f'<a href="/s/{session.id}/fixes">See your fixes</a></p>')
 
 
-def results_page(session, mock=False, error=None, recheck_error=None, notice=""):
+def results_page(session, mock=False, error=None, notice=""):
     results = session.results
     claude_note = ""
     if session.claude_failures:
@@ -499,7 +508,7 @@ def results_page(session, mock=False, error=None, recheck_error=None, notice="")
       {claude_note}
       {_import_notes(session)}
       {list_html}
-      {_fix_section(session, error, mock, recheck_error)}
+      {_fix_section(session, error, mock)}
       {privacy_panel(session, mock)}
     </div>
   </section>"""
@@ -535,9 +544,18 @@ def payment_privacy(payment_mode):
     return ("Payments are handled by Stripe.", "Retrack never sees your card number.")
 
 
+def _pay_unresolved_note(session, plan):
+    if not plan.unresolved:
+        return ""
+    how = ("with AI search, which you turned on" if session.settings["ai_search"] else
+           "if you turn on AI search then; otherwise you get the steps to check them by hand")
+    return (f'<p class="helper">After checkout, Retrack works out the songs marked “Needs fixing” {how}. '
+            "The price doesn’t change.</p>")
+
+
 def pay_page(session, plan, chosen, mock=False, payment_mode=DEMO, error=None):
     rows = "".join(f'<li><span class="title">{escape(r.row.title)}</span> '
-                   f'<span class="fix-kind">{escape(KIND_TEXT[fix_kind(r)])}</span></li>' for r in plan.songs)
+                   f'<span class="fix-kind">{escape(KIND_TEXT[sold_kind(r)])}</span></li>' for r in plan.songs)
     hidden = "".join(f'<input type="hidden" name="song" value="{i}">' for i in chosen)
     banner = {TEST: f'<p class="pay-banner" role="note"><strong>{escape(TEST_BANNER)}</strong></p>',
               DEMO: f'<p class="pay-banner" role="note"><strong>{escape(DEMO_BANNER)}</strong></p>'}.get(payment_mode, "")
@@ -549,6 +567,7 @@ def pay_page(session, plan, chosen, mock=False, payment_mode=DEMO, error=None):
       <h1 id="pay-title">Your fix pack</h1>
       <p class="lead price">{escape(price_line(plan.songs))}</p>
       <ul class="review-list">{rows}</ul>
+      {_pay_unresolved_note(session, plan)}
       {banner}
       <form method="post" action="/s/{session.id}/pay">
         {alert(*error) if error else ""}
@@ -605,17 +624,42 @@ STEPS_FOR = {
         ("Do the song’s own steps", ", then claim your share.",
          "Do the steps listed for the song, then claim your share. Only you know how big it is."),
     ],
+    UNRESOLVED: [
+        ("Search The MLC", " by this song’s title and writers.",
+         "Search The MLC’s public work search (on its website) for the song title and each writer’s name. "
+         "Also try without “The” or “(feat. …)”, and with writers’ last names only: registrations often "
+         "differ from the release."),
+        ("Link it if you find it", " to your recording’s ISRC.",
+         "If a registration is clearly your song, don’t register it again: a duplicate slows payment down. "
+         "In your MLC Portal, open the Matching Tool, search for your recording and propose the match to "
+         "that song code."),
+        ("Register it if you don’t", " in your MLC Portal.",
+         "If nothing matches, log in to your MLC Portal yourself and register the song (Works Registration), "
+         "listing this ISRC on it. Enter publishing information only for shares you control."),
+    ],
+    ALL_SET: [
+        ("Nothing to do", " for this song.",
+         "Smart names found that the writer names which looked different are the same people, and "
+         "nothing else is wrong with this song at The MLC."),
+    ],
 }
-KIND_HEADS = {REGISTER: "Register", LINK: "Link", CLAIM: "Claim"}
+KIND_HEADS = {REGISTER: "Register", LINK: "Link", CLAIM: "Claim", UNRESOLVED: "Check by hand",
+              ALL_SET: "All set"}
 KIND_LEADS = {
     REGISTER: "Not at The MLC yet: register these songs.",
     LINK: "Registered, but not linked to your recording: link them.",
     CLAIM: "Registered, but something’s missing: claim or fix them in the Portal.",
+    UNRESOLVED: "Couldn’t finish the automatic check; here’s how to check by hand.",
+    ALL_SET: "A closer look found nothing to fix.",
 }
+# When AI search was off, nothing was attempted, so say that instead of "couldn't finish".
+LEAD_AI_SEARCH_OFF = ("AI search was off, so Retrack couldn’t tell whether these need registering or "
+                      "linking. Here’s how to check by hand, or turn on AI search to work them out.")
 # Short meanings for the count row at the top, like Red/Yellow/Green on the results page.
-KIND_MEANINGS = {REGISTER: "Not at The MLC yet", LINK: "Registered, not linked", CLAIM: "Registered, something missing"}
+KIND_MEANINGS = {REGISTER: "Not at The MLC yet", LINK: "Registered, not linked", CLAIM: "Registered, something missing",
+                 UNRESOLVED: "Not placed yet", ALL_SET: "Nothing to fix"}
 # The verdict colour behind each kind of fix (register and link are red songs, claim is yellow).
-KIND_COLOURS = {REGISTER: "red", LINK: "red", CLAIM: "yellow"}
+KIND_COLOURS = {REGISTER: "red", LINK: "red", CLAIM: "yellow", UNRESOLVED: "red", ALL_SET: "green"}
 
 
 def _facts(pairs):
@@ -630,10 +674,11 @@ def _plural(n, word):
     return f"{n} {word if n == 1 else word + 's'}"
 
 
-def _fix_card(r):
+def _fix_card(r, kind):
     """One song as a closed <details> row, like the results page: the summary line says
     how much is filled in and how much is left; opening it shows every field."""
-    kind = fix_kind(r)
+    if kind in (UNRESOLVED, ALL_SET):
+        return _plain_card(r, kind)
     if kind == REGISTER:
         filled = [("Work title", r.row.title), ("Writers", ", ".join(r.row.writers)),
                   ("Recording artist", r.row.artist), ("ISRC", r.row.isrc)]
@@ -674,21 +719,43 @@ def _fix_card(r):
       </details>"""
 
 
-def _how_to(kind):
+def _plain_card(r, kind):
+    """A paid song with nothing to fill in: one still to check by hand, or one that's all set."""
+    facts = [("Title", r.row.title), ("Writers", ", ".join(r.row.writers)), ("ISRC", r.row.isrc)]
+    gist = "Not placed yet: check it by hand." if kind == UNRESOLVED else "Nothing to fix after a closer look."
+    notes = "".join(f"<li>{escape(n)}</li>" for n in r.notes)
+    return f"""<details class="song fix-card">
+        <summary>
+          <span class="song-name"><span class="title">{escape(r.row.title)}</span>
+            <span class="artist">{escape(r.row.artist)}</span></span>
+          <span class="gist">{escape(gist)}</span>
+          <span class="toggle" aria-hidden="true"></span>
+        </summary>
+        <div class="song-body">
+          <h3>What Retrack knows</h3><dl class="facts">{_facts(facts)}</dl>
+          {f'<h3>Notes</h3><ul class="song-steps">{notes}</ul>' if notes else ""}
+        </div>
+      </details>"""
+
+
+def _how_to(kind, lead=None):
     """Short steps, each one line starting with a bold verb, then one "More detail"
     disclosure with the full explanation of every step (a <details>: no script needed)."""
     short = "".join(f"<li><strong>{escape(verb)}</strong>{escape(rest)}</li>" for verb, rest, _ in STEPS_FOR[kind])
     full = "".join(f"<li>{escape(detail)}</li>" for _, _, detail in STEPS_FOR[kind])
     return f"""<div class="how">
           <h3 class="steps-head">How to do it</h3>
-          <p class="group-lead">{KIND_LEADS[kind]}</p>
+          <p class="group-lead">{escape(lead or KIND_LEADS[kind])}</p>
           <ol class="how-to">{short}</ol>
           <details class="more"><summary>More detail</summary><ol class="how-to-full">{full}</ol></details>
         </div>"""
 
 
-def _mlc_files(session, kind, template_note):
-    """The file for The MLC that belongs to this kind of fix, after its steps."""
+def _mlc_files(session, kind, template_note, songs=(), mock=False, recheck_error=None):
+    """The file for The MLC that belongs to this kind of fix, after its steps. For songs
+    still to check by hand that AI search was off for: the callout to turn it on."""
+    if kind == UNRESOLVED:
+        return "" if session.settings["ai_search"] else _needs_search(session, songs, mock, recheck_error)
     if kind == LINK:
         return (f'<div class="mlc-file"><h3 class="steps-head">File for The MLC</h3>'
                 f'<p><a href="/s/{session.id}/bulk_match.csv" download data-no-warn>{escape(bulk_match_name())}</a></p>'
@@ -726,9 +793,8 @@ def _fix_filters(kinds):
 
 
 def fixes_page(session, plan, mock=False, template_note="", error=None, seconds_left=SESSION_SECONDS,
-               lifetime=SESSION_SECONDS):
-    all_kinds = ((REGISTER, plan.register), (LINK, plan.link), (CLAIM, plan.claim))
-    kinds = [(kind, songs) for kind, songs in all_kinds if songs]
+               lifetime=SESSION_SECONDS, recheck_error=None):
+    kinds = [(kind, songs) for kind, songs in plan.by_kind() if songs]
     # Only kinds with songs: no "0" tiles, tabs or sections.
     ledger = "".join(
         f'<div class="is-{KIND_COLOURS[kind]}"><dt>{KIND_HEADS[kind]}</dt>'
@@ -741,10 +807,10 @@ def fixes_page(session, plan, mock=False, template_note="", error=None, seconds_
       <section class="group fix-group is-{KIND_COLOURS[kind]}" data-status="{kind}" aria-labelledby="group-{kind}">
         <div class="group-head"><h2 id="group-{kind}">{KIND_HEADS[kind]}</h2>
           <span class="count">{_plural(len(songs), "song")}</span></div>
-        {"".join(_fix_card(r) for r in songs)}
+        {"".join(_fix_card(r, kind) for r in songs)}
         <div class="fix-how">
-          {_how_to(kind)}
-          {_mlc_files(session, kind, template_note)}
+          {_how_to(kind, LEAD_AI_SEARCH_OFF if kind == UNRESOLVED and not session.settings["ai_search"] else None)}
+          {_mlc_files(session, kind, template_note, songs, mock, recheck_error)}
         </div>
       </section>"""
 
@@ -761,6 +827,7 @@ def fixes_page(session, plan, mock=False, template_note="", error=None, seconds_
       </div>
       <p class="lead">Everything Retrack could fill in is below; the highlighted fields are yours to fill in.</p>
       {alert(*error) if error else ""}
+      {_finish_notes(session)}
       <div class="vanish keep" role="note">
         <div><p>{escape(keep_text(lifetime))}</p>{_time_left(session, seconds_left)}</div>
         <div class="actions">
@@ -776,6 +843,18 @@ def fixes_page(session, plan, mock=False, template_note="", error=None, seconds_
     </div>
   </section>"""
     return layout("Your fixes, Retrack", body, mock, step="fix")
+
+
+def _finish_notes(session):
+    """Why some paid songs couldn't be worked out after checkout, if anything went wrong."""
+    notes = []
+    if session.finish_problem:
+        notes.append(session.finish_problem)
+    if session.claude_failures:
+        n = session.claude_failures
+        notes.append(f"The AI service didn’t answer for {n} {'check' if n == 1 else 'checks'} (or a spending "
+                     "limit was reached), so those songs are marked for checking by hand.")
+    return "".join(f'<p class="notice" role="status">{escape(n)}</p>' for n in notes)
 
 
 def session_template_ready(session):

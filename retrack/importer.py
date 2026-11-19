@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .checker import normalize_isrc
-from .name_matcher import MODEL
+from .ai import MODEL  # one shared model for every Claude call
 
 FIELDS = ("title", "artist", "isrc", "writers")
 REQUIRED = ("title", "isrc")  # without these, there's no catalog to check
@@ -371,16 +371,11 @@ class ClaudeColumnMapper:
 
     def _ask(self, headers, samples):
         try:
-            response = self.client.beta.messages.create(
+            response = self.client.messages.create(
                 model=self.model,
-                max_tokens=4096,
-                output_config={
-                    "effort": "low",  # a short, well-defined question
-                    "format": {"type": "json_schema", "schema": MAPPING_SCHEMA},
-                },
-                # If the main model declines, let the API retry on a fallback model.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
+                max_tokens=1024,  # which column is which, as JSON
+                # Structured output: the reply must match MAPPING_SCHEMA, so it always parses.
+                output_config={"format": {"type": "json_schema", "schema": MAPPING_SCHEMA}},
                 system=MAPPING_PROMPT,
                 messages=[{"role": "user", "content": mapping_request_text(headers, samples)}],
             )

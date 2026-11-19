@@ -336,5 +336,15 @@ def apply_missing_writer_search(result, client, work_searcher):
                         "song. If it is, ask The MLC to merge the two so all writers are on one record.")
 
 
+def needs_ai_after_checkout(result, smart_names, ai_search):
+    """Web UI: does this paid song get the AI checks the user turned on?
+
+    AI search places red songs nobody has placed yet (register or link?); smart names
+    takes a second look at writers missing from the MLC record. Nothing else uses the AI.
+    """
+    unplaced_red = result.status == RED and not result.red_case
+    return bool((ai_search and unplaced_red) or (smart_names and result.missing_writers))
+
+
 def check_catalog(rows, client, name_matcher=None, work_searcher=None):
     return [check_row(r, client, name_matcher, work_searcher) for r in rows]

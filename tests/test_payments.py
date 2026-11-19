@@ -22,7 +22,7 @@ from retrack.payments import (DEMO, LIVE, TEST, TEST_BANNER, DemoPayments, Payme
 from retrack.sessions import SESSION_SECONDS, SessionStore
 from retrack.web_pages import keep_text, time_left_text
 
-from test_web import call, fixable_ids, form, scan, text, upload_ok, wait_done
+from test_web import call, fixable_ids, form, open_fixes, scan, text, upload_ok, wait_done
 
 ROOT = Path(__file__).parent.parent
 
@@ -252,7 +252,7 @@ def test_paying_unlocks_the_fixes(stripe_server):
     stripe_server.fake.customer_pays("cs_test_1")
     status, headers, _ = call(stripe_server, f"/s/{sid}/paid?checkout_session_id=cs_test_1")
     assert status == 303 and headers["Location"].endswith("/fixes")
-    assert text(stripe_server, f"/s/{sid}/fixes")[0] == 200
+    assert open_fixes(stripe_server, sid)[0] == 200
     assert call(stripe_server, f"/s/{sid}/fixes.xlsx")[0] == 200
 
 
@@ -311,7 +311,7 @@ def test_a_lost_redirect_is_recovered_on_the_next_visit(stripe_server):
     stripe_server.fake.customer_pays("cs_test_1")  # paid, but never came back to /paid
     _, page = text(stripe_server, f"/s/{sid}/results")
     assert "See your fixes" in page
-    assert text(stripe_server, f"/s/{sid}/fixes")[0] == 200
+    assert open_fixes(stripe_server, sid)[0] == 200
 
 
 def test_canceled_checkout_goes_back_to_results_with_nothing_lost(stripe_server):
@@ -357,7 +357,7 @@ def test_demo_mode_works_offline(tmp_path, monkeypatch):
         assert "Pay (demo)" in page and payments_mod.DEMO_BANNER in page
         status, headers, _ = pay(srv, sid, ids)
         assert status == 303 and headers["Location"].endswith("/fixes")
-        assert text(srv, f"/s/{sid}/fixes")[0] == 200
+        assert open_fixes(srv, sid)[0] == 200
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
@@ -379,13 +379,14 @@ def paid(tmp_path):
     srv = start(tmp_path, DemoPayments())
     sid, ids = ready_to_pay(srv)
     pay(srv, sid, ids)
+    open_fixes(srv, sid)  # like a customer: the first visit runs the after-checkout checks
     yield srv, sid
     srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
 
 def test_fix_page_groups_by_type_with_prefilled_and_must_fill(paid):
     srv, sid = paid
-    _, page = text(srv, f"/s/{sid}/fixes")
+    _, page = open_fixes(srv, sid)
     for head in ('id="group-register">Register', 'id="group-link">Link', 'id="group-claim">Claim'):
         assert head in page
     assert page.count(keep_text()) == 1  # once, at the top, in the box with the downloads
@@ -397,7 +398,7 @@ def test_fix_page_groups_by_type_with_prefilled_and_must_fill(paid):
 
 def test_fix_page_has_tabs_and_short_rows_like_the_results_page(paid):
     srv, sid = paid
-    _, page = text(srv, f"/s/{sid}/fixes")
+    _, page = open_fixes(srv, sid)
     # Tabs: hidden until the script runs (with JS off every group just shows), one per kind of fix.
     assert '<div class="filters" role="group" aria-label="Show fixes" hidden>' in page
     for kind in ("all", "register", "link", "claim"):
@@ -420,7 +421,7 @@ def test_fix_page_has_tabs_and_short_rows_like_the_results_page(paid):
 
 def test_each_fix_group_shows_songs_then_steps_then_the_file(paid):
     srv, sid = paid
-    _, page = text(srv, f"/s/{sid}/fixes")
+    _, page = open_fixes(srv, sid)
     for kind in ("register", "link"):
         group = page.split(f'data-status="{kind}"')[1].split("</section>")[0]
         songs, steps, file_ = (group.index('<details class="song fix-card">'), group.index("How to do it"),
@@ -432,19 +433,21 @@ def test_steps_are_short_lines_with_the_full_text_under_more_detail(paid):
     from html import escape
     from retrack.web_pages import STEPS_FOR
     srv, sid = paid
-    _, page = text(srv, f"/s/{sid}/fixes")
+    _, page = open_fixes(srv, sid)
     assert page.count('<details class="more"><summary>More detail</summary>') == 3  # one per group
-    for steps in STEPS_FOR.values():
+    for kind, steps in STEPS_FOR.items():
         for verb, rest, detail in steps:
+            assert len(verb + rest) <= 60, verb  # short enough for one line, on every kind
+            if kind not in ("register", "link", "claim"):
+                continue  # this sample order has no songs of the other kinds
             assert f"<li><strong>{escape(verb)}</strong>{escape(rest)}</li>" in page
             assert f"<li>{escape(detail)}</li>" in page  # the full explanation is still there
-            assert len(verb + rest) <= 60, verb  # short enough for one line
 
 
 def test_download_label_is_short_but_the_file_keeps_its_date(paid):
     from retrack.fixes import fixes_workbook_name
     srv, sid = paid
-    _, page = text(srv, f"/s/{sid}/fixes")
+    _, page = open_fixes(srv, sid)
     assert ">Download fixes (.xlsx)</a>" in page
     _, headers, _ = call(srv, f"/s/{sid}/fixes.xlsx")
     assert fixes_workbook_name() in headers["Content-Disposition"]
@@ -452,7 +455,7 @@ def test_download_label_is_short_but_the_file_keeps_its_date(paid):
 
 def test_template_upload_is_an_optional_time_saver(paid):
     srv, sid = paid
-    _, page = text(srv, f"/s/{sid}/fixes")
+    _, page = open_fixes(srv, sid)
     register = page.split('data-status="register"')[1].split("</section>")[0]
     assert "Lots of songs? Upload your MLC template and Retrack fills a copy." in register
     assert 'class="mlc-file mlc-file--optional"' in register
@@ -465,7 +468,7 @@ def test_kinds_with_no_songs_get_no_tile_tab_or_section(paid):
     from retrack.fixes import plan_fixes
     srv, sid = paid
     session = srv.sessions.get(sid)
-    plan = plan_fixes([session.results[i] for i in session.paid_songs])
+    plan = plan_fixes([session.results[i] for i in session.paid_songs], sell_red=True)
     assert plan.register and plan.link and plan.claim
     plan.link = []
     page = pages.fixes_page(session, plan, mock=True)
@@ -493,7 +496,7 @@ def test_template_upload_fills_a_copy_and_leaves_the_rest_alone(paid, tmp_path):
     body, ctype = multipart([("template", ("mlc_template.xlsx", original))])
     status, headers, _ = call(srv, f"/s/{sid}/template", body, ctype)
     assert status == 303
-    assert "Download your filled-in template" in text(srv, f"/s/{sid}/fixes")[1]
+    assert "Download your filled-in template" in open_fixes(srv, sid)[1]
     status, _, data = call(srv, f"/s/{sid}/bulk_work_registration.xlsx")
     assert status == 200
     copy, before = load_workbook(io.BytesIO(data)), load_workbook(io.BytesIO(original))
@@ -534,7 +537,8 @@ def test_web_main_loads_the_env_file(tmp_path, monkeypatch, capsys):
 def test_env_example_lists_every_variable_blank():
     values = parse_env((ROOT / ".env.example").read_text())
     for name in ("MLC_USERNAME", "MLC_PASSWORD", "ANTHROPIC_API_KEY", "STRIPE_SECRET_KEY",
-                 "STRIPE_PUBLISHABLE_KEY", "STRIPE_WEBHOOK_SECRET", "RETRACK_PAYMENTS_LIVE"):
+                 "STRIPE_PUBLISHABLE_KEY", "STRIPE_WEBHOOK_SECRET", "RETRACK_PAYMENTS_LIVE",
+                 "RETRACK_AI_DAILY_LIMIT_USD"):
         assert name in values and values[name] == "", name
 
 
@@ -554,12 +558,12 @@ def test_time_left_is_rendered_by_the_server_and_counts_down(tmp_path):
     try:
         sid, ids = ready_to_pay(srv)
         pay(srv, sid, ids)
-        page = text(srv, f"/s/{sid}/fixes")[1]
+        page = open_fixes(srv, sid)[1]
         assert time_left_text(SESSION_SECONDS) == "About 60 minutes left."
         assert page.count("About 60 minutes left.") == 1  # in the page itself: works with JS off
         assert 'data-time-left-url="/s/' in page  # for the script's live updates
         now[0] += 15 * 60
-        assert "About 45 minutes left." in text(srv, f"/s/{sid}/fixes")[1]
+        assert "About 45 minutes left." in open_fixes(srv, sid)[1]
         import json
         status, _, body = call(srv, f"/s/{sid}/time_left")
         assert status == 200 and json.loads(body) == {"seconds": 45 * 60, "text": "About 45 minutes left."}
@@ -654,7 +658,7 @@ def test_a_valid_webhook_unlocks_the_order_without_the_return_page(hooked):
     status, _, body = webhook(hooked, payload, sig)
     assert status == 200 and json.loads(body)["unlocked"] is True
     assert hooked.sessions.get(sid).paid_songs == sorted(int(i) for i in ids)
-    assert text(hooked, f"/s/{sid}/fixes")[0] == 200
+    assert open_fixes(hooked, sid)[0] == 200
 
 
 def test_async_payment_unlocks_only_when_it_succeeds(hooked):

@@ -15,7 +15,7 @@ money figures.
 import json
 from dataclasses import dataclass
 
-MODEL = "claude-opus-5-5"
+from .ai import MODEL  # one shared model for every Claude call
 
 SYSTEM_PROMPT = """You compare two songwriter names from music publishing records and \
 decide whether they are likely the same person.
@@ -69,20 +69,15 @@ class ClaudeNameMatcher:
 
     def _ask(self, a, b):
         try:
-            response = self.client.beta.messages.create(
+            response = self.client.messages.create(
                 model=self.model,
-                max_tokens=2048,
-                output_config={
-                    "effort": "low",  # a short yes/no question doesn't need deep thinking
-                    "format": {"type": "json_schema", "schema": ANSWER_SCHEMA},
-                },
-                # If the main model declines, let the API retry on a fallback model.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
+                max_tokens=512,  # the answer is a short JSON object
+                # Structured output: the reply must match ANSWER_SCHEMA, so it always parses.
+                output_config={"format": {"type": "json_schema", "schema": ANSWER_SCHEMA}},
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": f'Name A: "{a}"\nName B: "{b}"'}],
             )
-        except Exception as e:  # network down, bad key, rate limit...
+        except Exception as e:  # network down, bad key, rate limit, AI limit reached...
             # Don't crash a whole catalog run over one name: treat it as "not matched",
             # so the writer still gets flagged for a human to look at.
             return MatchVerdict(False, 0.0, f"name check unavailable ({type(e).__name__})")

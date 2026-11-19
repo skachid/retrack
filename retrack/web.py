@@ -8,16 +8,17 @@ The flow, one page per step (pages are built in web_pages.py):
   POST /upload                  saves it in a private session folder, reads it
   GET  /s/<id>/columns          confirm the column mapping
   POST /s/<id>/columns          converts the rows with that mapping
-  GET  /s/<id>/check            choose the extra checks (smart names, AI search)
-  POST /s/<id>/scan             starts the check in the background
-  POST /s/<id>/recheck          checks red songs again with AI search (only those)
+  GET  /s/<id>/check            choose the extra checks (smart names, AI search: after checkout)
+  POST /s/<id>/scan             starts the free check in the background (it never calls the AI)
+  POST /s/<id>/recheck          after checkout: AI search for paid red songs it was off for
   GET  /s/<id>/progress         "Checking 37 of 120…" (refreshes itself)
   GET  /s/<id>/status           the same, as JSON, for the page's script
   GET  /s/<id>/results          the report, with songs to tick for the fix pack
   POST /s/<id>/fix              the ticked songs -> the pay page ("N songs × $X = $Total")
   POST /s/<id>/pay              needs the attestation checkbox -> Stripe Checkout (or Pay (demo))
   GET  /s/<id>/paid             Stripe sends the customer back here; we ask Stripe if it's paid
-  GET  /s/<id>/fixes            the on-screen fix pack (paid songs only)
+  GET  /s/<id>/fixes            the on-screen fix pack (paid songs only). The first visit after
+                                paying runs the AI checks on the paid songs ("Working out…")
   GET  /s/<id>/fixes.xlsx       Retrack_Fixes_YYYYMMDD.xlsx; also bulk_match.csv and, after
   POST /s/<id>/template         an uploaded MLC template, bulk_work_registration.xlsx
   GET  /s/<id>/time_left        how long the fix page has left (the page's script asks)
@@ -55,10 +56,11 @@ from urllib.parse import parse_qs, urlsplit
 import requests
 
 from . import web_pages as pages
-from .checker import RED, check_row, load_catalog
+from .ai import (DAILY_LIMIT_ENV, AIConfigError, DailySpend, MeteredClient, daily_limit_from_env)
+from .checker import RED, check_row, load_catalog, needs_ai_after_checkout
 from .env import load_env
-from .fixes import (FIX_PRICE_USD, FixPackError, bulk_match_name, confirm, fix_kind, fixes_workbook_name,
-                    open_template, plan_fixes, split_for_template, total_price, write_bulk_match,
+from .fixes import (FIX_PRICE_USD, UNRESOLVED, FixPackError, bulk_match_name, confirm, fixes_workbook_name,
+                    open_template, plan_fixes, sold_kind, split_for_template, total_price, write_bulk_match,
                     write_fixes_workbook, write_template_copy)
 from .payments import (DEMO, LIVE, TEST, WEBHOOK_EVENTS, PaymentConfigError, PaymentError, WebhookError,
                        checkout_from_event, payments_from_env, verify_webhook)
@@ -69,7 +71,7 @@ from .name_matcher import ClaudeNameMatcher, MockNameMatcher
 from .preview import HOST, PORT, port_busy_message, run_until_stopped
 from .report import render_html
 from .sessions import SessionStore
-from .work_search import ClaudeWorkSearcher, MockWorkSearcher
+from .work_search import MAX_SEARCHES, ClaudeWorkSearcher, MockWorkSearcher
 
 MAX_UPLOAD_BYTES = 5_000_000  # a big .xlsx catalog is well under this
 MAX_FORM_BYTES = 200_000      # the non-file forms (columns, ticked songs)
@@ -181,28 +183,51 @@ AI_MISSING = ("The AI checks aren’t set up on this computer",
 NO_AI_CONSENT = ("Tick AI search first",
                  "These songs can only be placed with AI search, which sends their titles and writer names "
                  "out of this computer. Tick the box to allow it, then press the button again.")
+FINISH_MLC_DOWN = ("The MLC didn’t answer while Retrack was working out your songs, so some of them "
+                   "need checking by hand. Nothing you paid for is lost.")
+FINISH_NO_AI = ("The AI service isn’t set up on this computer, so Retrack couldn’t run the extra checks. "
+                "Those songs need checking by hand.")
 
 
-def run_scan(session, make_client, name_matcher, work_searcher):
+def run_scan(session, make_client, name_matcher, work_searcher, on_done=None):
     """Check the rows listed in session.todo, updating session.done as it goes.
-    Runs in its own thread. A first check lists every row; a re-check lists only
-    the songs being checked again, and their old results are replaced."""
+    Runs in its own thread.
+
+    session.phase says which job this is:
+      "scan"   - the free check of every row. Web UI: no AI at all (both are None).
+      "finish" - after checkout: only paid songs, again, with the AI checks turned on.
+                 AI search runs only for red songs. Their old results are replaced.
+    on_done() runs at the end of a finish (it logs what the AI cost).
+    """
     try:
         client = make_client()
         for i in session.todo:
             if session.cancelled:  # "Delete my files now" was pressed
                 return
-            session.results[i] = check_row(session.rows[i], client, name_matcher, work_searcher)
+            before = session.results[i]
+            searcher = work_searcher if before is not None and before.status == RED else None
+            session.results[i] = check_row(session.rows[i], client, name_matcher, searcher)
             session.done += 1
         session.state = "done"
-    except MLCAuthError:
-        session.fail(*MLC_LOGIN_FAILED)
-    except (MLCError, requests.RequestException):
-        session.fail(*MLC_DOWN)
-    except Exception as e:  # a bug: say so plainly instead of hanging on "Checking…"
-        session.fail("Something went wrong inside Retrack",
-                     f"Your file is fine. Press Start the check to try again; if it happens again, "
-                     f"restart Retrack. ({type(e).__name__})")
+    except Exception as e:
+        if session.phase == "finish":
+            # The songs are paid for: never strand them on an error page. Keep what we
+            # have; the fix page says which songs need checking by hand, and why.
+            session.finish_problem = FINISH_MLC_DOWN
+            session.state = "done"
+        elif isinstance(e, MLCAuthError):
+            session.fail(*MLC_LOGIN_FAILED)
+        elif isinstance(e, (MLCError, requests.RequestException)):
+            session.fail(*MLC_DOWN)
+        else:  # a bug: say so plainly instead of hanging on "Checking…"
+            session.fail("Something went wrong inside Retrack",
+                         f"Your file is fine. Press Start the check to try again; if it happens again, "
+                         f"restart Retrack. ({type(e).__name__})")
+    finally:
+        if session.phase == "finish":
+            session.finished |= set(session.todo)
+            if on_done:
+                on_done()
 
 
 # ---- Paid or not: one test, used by the return page, _sync_order() and the webhook ----------
@@ -221,7 +246,13 @@ def order_is_paid(session, checkout):
 
 
 def mark_paid(session, songs):
-    """Unlock these songs. Doing it twice changes nothing (idempotent)."""
+    """Unlock these songs. Doing it twice changes nothing (idempotent).
+
+    Each newly paid song also adds MAX_SEARCHES AI calls to what this session may
+    use after checkout: the per-order AI limit (see ai.py).
+    """
+    new = set(songs) - set(session.paid_songs)
+    session.ai_budget.add_songs(len(new), MAX_SEARCHES)
     session.paid_songs = sorted(set(session.paid_songs) | set(songs))
     session.order = None
 
@@ -233,7 +264,7 @@ class Config:
     swap the MLC and Claude for fakes."""
 
     def __init__(self, make_client, mock, sessions, make_name_matcher, make_work_searcher, payments,
-                 webhook_secret="", log=None):
+                 webhook_secret="", log=None, make_claude=None, daily=None):
         self.payments = payments  # payments.StripePayments or DemoPayments
         self.webhook_secret = webhook_secret  # STRIPE_WEBHOOK_SECRET: checks Stripe's signature
         self.log = log or (lambda line: print(line, file=sys.stderr))  # event types and counts only
@@ -241,8 +272,18 @@ class Config:
         self.make_client = make_client
         self.mock = mock
         self.sessions = sessions
+        # The AI: make_claude() makes the raw API client; the two factories take the
+        # (metered) client and return a matcher or searcher. daily holds today's AI spend.
         self.make_name_matcher = make_name_matcher
         self.make_work_searcher = make_work_searcher
+        self.make_claude = make_claude or _anthropic_client
+        self.daily = daily if daily is not None else DailySpend(daily_limit_from_env(os.environ))
+
+
+def _anthropic_client():
+    import anthropic  # imported here so --mock works without the anthropic package
+
+    return anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from the environment
 
 
 def make_handler(config):
@@ -408,20 +449,61 @@ def make_handler(config):
             self._redirect(f"/s/{session.id}/check")
 
         # -- 3. check --
-        def _checkers(self, session):
-            """The extra checks the settings ask for. Raises if the AI service isn't set up."""
-            name_matcher = (WatchedNameMatcher(config.make_name_matcher(), session)
-                            if session.settings["smart_names"] else None)
-            work_searcher = (WatchedWorkSearcher(config.make_work_searcher(), session)
-                             if session.settings["ai_search"] else None)
+        def _ai_tools(self, session, smart_names, ai_search):
+            """The AI checks to run after checkout, as (name matcher, work searcher), or
+            None if the AI service isn't set up. Every call goes through a MeteredClient:
+            it enforces the order's and the day's limits and counts the tokens."""
+            client = None
+            if not mock:  # --mock: offline stand-ins, no AI client is ever made
+                try:
+                    client = MeteredClient(config.make_claude(), session.ai_budget, config.daily)
+                except Exception:  # no anthropic package, no API key...
+                    return None
+            name_matcher = (WatchedNameMatcher(config.make_name_matcher(client), session)
+                            if smart_names else None)
+            work_searcher = (WatchedWorkSearcher(config.make_work_searcher(client), session)
+                             if ai_search else None)
             return name_matcher, work_searcher
 
-        def _start(self, session, todo, name_matcher, work_searcher):
-            session.todo, session.done = todo, 0
+        def _start(self, session, todo, name_matcher=None, work_searcher=None, phase="scan"):
+            session.todo, session.done, session.phase = todo, 0, phase
             session.error, session.claude_failures, session.state = None, 0, "running"
+            on_done = None
+            if phase == "finish":
+                session.ai_budget.start_run()
+                on_done = lambda: self._log_ai_usage(session, len(todo))
             threading.Thread(target=run_scan, daemon=True,
-                             args=(session, config.make_client, name_matcher, work_searcher)).start()
+                             args=(session, config.make_client, name_matcher, work_searcher, on_done)).start()
             self._redirect(f"/s/{session.id}/progress")
+
+        def _log_ai_usage(self, session, songs):
+            """What one order's AI checks cost, for the terminal. Counts and dollars only."""
+            if mock:
+                return
+            line = (f"AI usage for one order ({songs} {'song' if songs == 1 else 'songs'}): "
+                    f"{session.ai_budget.usage.summary()}. Today: about ${config.daily.spent_usd:.4f} "
+                    f"of ${config.daily.limit_usd:.2f}.")
+            if session.ai_budget.limit_hit:
+                line += " Some AI calls were skipped because a limit was reached."
+            config.log(line)
+
+        def _finish_paid_songs(self, session):
+            """The first visit to the fixes after paying: run the AI checks the user turned on,
+            on the newly paid songs only. Returns True if a run started (we've redirected)."""
+            pending = [i for i in session.paid_songs if i not in session.finished]
+            if not pending:
+                return False
+            s = session.settings
+            todo = [i for i in pending if needs_ai_after_checkout(session.results[i], s["smart_names"],
+                                                                  s["ai_search"])]
+            if todo:
+                tools = self._ai_tools(session, s["smart_names"], s["ai_search"])
+                if tools is not None:
+                    self._start(session, todo, *tools, phase="finish")
+                    return True
+                session.finish_problem = FINISH_NO_AI
+            session.finished |= set(pending)  # nothing to run for these
+            return False
 
         def get_check(self, session):
             if session.state == "columns":
@@ -437,34 +519,38 @@ def make_handler(config):
                 return self._redirect(f"/s/{session.id}/columns")
             form = self._form()
             session.settings = {"smart_names": "smart_names" in form, "ai_search": "ai_search" in form}
-            try:
-                name_matcher, work_searcher = self._checkers(session)
-            except Exception:  # no anthropic package, no API key...
-                return self._send(503, pages.check_page(session, mock, error=AI_MISSING))
+            if (session.settings["smart_names"] or session.settings["ai_search"]) and not mock:
+                # The AI only runs after checkout, but say now if it isn't set up, not after paying.
+                try:
+                    config.make_claude()
+                except Exception:  # no anthropic package, no API key...
+                    return self._send(503, pages.check_page(session, mock, error=AI_MISSING))
             session.results = [None] * len(session.rows)
-            self._start(session, list(range(len(session.rows))), name_matcher, work_searcher)
+            # The free check never calls the AI: no name matcher, no work searcher.
+            self._start(session, list(range(len(session.rows))))
 
         def post_recheck(self, session):
-            """Check the red songs that need AI search again, with AI search on. Only those."""
+            """After checkout: AI search for the paid red songs that couldn't be placed
+            because AI search was off. Only those, and only with the box ticked."""
+            if self._need_paid(session):
+                return
             if session.state != "done":
                 return self._redirect(f"/s/{session.id}/progress")
             form = self._form()
             if "ai_search" not in form:  # the box is the user's OK to send titles and writer names
-                return self._send(400, pages.results_page(session, mock, recheck_error=NO_AI_CONSENT))
-            todo = [i for i, r in enumerate(session.results) if r.status == RED and not fix_kind(r)]
+                return self._send_fixes(session, 400, recheck_error=NO_AI_CONSENT)
+            todo = [i for i in session.paid_songs if sold_kind(session.results[i]) == UNRESOLVED]
             if not todo:
-                return self._redirect(f"/s/{session.id}/results")
-            session.settings = dict(session.settings, ai_search=True)
-            try:
-                name_matcher, work_searcher = self._checkers(session)
-            except Exception:
-                session.settings = dict(session.settings, ai_search=False)
-                return self._send(503, pages.results_page(session, mock, recheck_error=AI_MISSING))
-            self._start(session, todo, name_matcher, work_searcher)
+                return self._redirect(f"/s/{session.id}/fixes")
+            tools = self._ai_tools(session, smart_names=False, ai_search=True)
+            if tools is None:
+                return self._send_fixes(session, 503, recheck_error=AI_MISSING)
+            session.settings = dict(session.settings, ai_search=True)  # so the privacy copy says so
+            self._start(session, todo, *tools, phase="finish")
 
         def get_progress(self, session):
             if session.state == "done":
-                return self._redirect(f"/s/{session.id}/results")
+                return self._redirect(f"/s/{session.id}/{'fixes' if session.phase == 'finish' else 'results'}")
             if session.state == "failed":
                 title, message = session.error
                 retry = (f'<a class="btn" href="/s/{session.id}/check">Back to the checks</a>'
@@ -475,7 +561,8 @@ def make_handler(config):
             self._send(200, pages.progress_page(session, mock))
 
         def get_status(self, session):
-            nxt = {"done": "results", "failed": "progress", "columns": "columns",
+            done_page = "fixes" if session.phase == "finish" else "results"
+            nxt = {"done": done_page, "failed": "progress", "columns": "columns",
                    "ready": "check"}.get(session.state, "progress")
             self._send(200, json.dumps({"state": session.state, "done": session.done, "total": session.total,
                                         "text": pages.progress_text(session), "next": f"/s/{session.id}/{nxt}"}),
@@ -506,10 +593,10 @@ def make_handler(config):
         def _chosen(self, session, values):
             n = len(session.results)
             chosen = sorted({int(v) for v in values if v.isdigit() and int(v) < n})
-            return [i for i in chosen if fix_kind(session.results[i])]
+            return [i for i in chosen if sold_kind(session.results[i])]
 
         def _paid_plan(self, session):
-            return plan_fixes([session.results[i] for i in session.paid_songs])
+            return plan_fixes([session.results[i] for i in session.paid_songs], sell_red=True)
 
         def _base_url(self):
             """Where Stripe should send the customer back: this same Retrack, as the browser sees it."""
@@ -536,7 +623,7 @@ def make_handler(config):
             if not chosen:
                 return self._send(400, pages.results_page(session, mock, error=(
                     "No songs ticked", "Tick at least one song to fix, then press Review my fix pack.")))
-            plan = plan_fixes([session.results[i] for i in chosen])
+            plan = plan_fixes([session.results[i] for i in chosen], sell_red=True)
             self._send(200, pages.pay_page(session, plan, chosen, mock, config.payments.mode))
 
         def post_pay(self, session):
@@ -547,7 +634,7 @@ def make_handler(config):
             chosen = [i for i in self._chosen(session, form.get("song", [])) if i not in session.paid_songs]
             if not chosen:
                 return self._redirect(f"/s/{session.id}/{'fixes' if session.paid_songs else 'results'}")
-            plan = plan_fixes([session.results[i] for i in chosen])
+            plan = plan_fixes([session.results[i] for i in chosen], sell_red=True)
 
             # No attestation, no fix pack: checked here, on the server, not just by the
             # checkbox's "required" attribute (which a browser or script can skip).
@@ -666,13 +753,20 @@ def make_handler(config):
             seconds = config.sessions.seconds_left(session)
             self._json(200, {"seconds": seconds, "text": pages.time_left_text(seconds)})
 
+        def _send_fixes(self, session, status=200, **kw):
+            self._send(status, pages.fixes_page(session, self._paid_plan(session), mock, session.template_note,
+                                                seconds_left=config.sessions.seconds_left(session),
+                                                lifetime=config.sessions.lifetime, **kw))
+
         def get_fixes(self, session):
             self._sync_order(session)
             if self._need_paid(session):
                 return
-            self._send(200, pages.fixes_page(session, self._paid_plan(session), mock, session.template_note,
-                                             seconds_left=config.sessions.seconds_left(session),
-                                             lifetime=config.sessions.lifetime))
+            if session.state == "running":
+                return self._redirect(f"/s/{session.id}/progress")
+            if self._finish_paid_songs(session):
+                return
+            self._send_fixes(session)
 
         def get_fixes_xlsx(self, session):
             if self._need_paid(session):
@@ -744,25 +838,30 @@ def make_handler(config):
 
 
 def start_server(make_client, mock=False, host=HOST, port=PORT, sessions=None,
-                 make_name_matcher=None, make_work_searcher=None, payments=None, webhook_secret=None, log=None):
+                 make_name_matcher=None, make_work_searcher=None, payments=None, webhook_secret=None, log=None,
+                 make_claude=None, daily=None):
     """Open the port and return the server (not running yet). port=0 picks any free port.
 
     The server always listens on `host`, which defaults to 127.0.0.1 (this computer only).
     """
     sessions = sessions or SessionStore()  # clears leftovers from a crashed run
+    # Each factory gets the metered AI client (None with --mock) and returns a matcher/searcher.
     if make_name_matcher is None:
-        make_name_matcher = MockNameMatcher if mock else ClaudeNameMatcher
+        make_name_matcher = ((lambda client: MockNameMatcher()) if mock
+                             else (lambda client: ClaudeNameMatcher(client=client)))
     if make_work_searcher is None:
-        make_work_searcher = MockWorkSearcher if mock else ClaudeWorkSearcher
+        make_work_searcher = ((lambda client: MockWorkSearcher()) if mock
+                              else (lambda client: ClaudeWorkSearcher(client=client)))
     if payments is None:
         payments = payments_from_env(os.environ, mock)  # raises PaymentConfigError for an unsafe key
     if webhook_secret is None:
         webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
     config = Config(make_client, mock, sessions, make_name_matcher, make_work_searcher, payments,
-                    webhook_secret, log)
+                    webhook_secret, log, make_claude, daily)  # daily=None: reads RETRACK_AI_DAILY_LIMIT_USD
     server = ThreadingHTTPServer((host, port), make_handler(config))
     server.sessions = sessions
     server.payments = payments
+    server.ai_daily = config.daily
     _start_sweeper(sessions)
     return server
 
@@ -803,12 +902,15 @@ def main(argv=None, open_browser=webbrowser.open):
         # but payments come from the environment like a real run (still refusing live keys).
         payments = payments_from_env(os.environ, mock=False) if args.mock_mlc else None
         server = start_server(make_client, args.mock or args.mock_mlc, port=args.port, payments=payments)
-    except PaymentConfigError as e:
+    except (PaymentConfigError, AIConfigError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     except OSError:
         print(port_busy_message(args.port))
         return 1
+    if not (args.mock or args.mock_mlc):
+        print(f"AI checks: up to ${server.ai_daily.limit_usd:.2f} a day ({DAILY_LIMIT_ENV}), and "
+              f"{MAX_SEARCHES} AI calls per paid song. Each order's cost is logged here.")
     if server.payments.mode == TEST:
         print("Payments: Stripe test mode (no real money).")
         if not os.environ.get("STRIPE_WEBHOOK_SECRET"):

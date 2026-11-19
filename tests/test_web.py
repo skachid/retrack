@@ -147,6 +147,24 @@ def scanned(srv, **kw):
     return sid
 
 
+def open_fixes(srv, sid):
+    """GET the fix page. The first visit after paying runs the AI checks on the paid
+    songs first ("Working out…"), so follow that until it's done. Returns (status, page)."""
+    status, headers, body = call(srv, f"/s/{sid}/fixes")
+    if status == 303 and headers["Location"].endswith("/progress"):
+        assert wait_done(srv, sid)["state"] == "done"
+        status, headers, body = call(srv, f"/s/{sid}/fixes")
+    return status, body.decode()
+
+
+def pay_all(srv, sid, ids=None):
+    """Tick every song on offer (or just `ids`) and pay. Tests have no Stripe keys: Pay (demo)."""
+    ids = ids if ids is not None else fixable_ids(text(srv, f"/s/{sid}/results")[1])
+    status, headers, _ = call(srv, f"/s/{sid}/pay", *form([("song", i) for i in ids] + [("attest", "yes")]))
+    assert status == 303 and headers["Location"].endswith("/fixes")
+    return ids
+
+
 def fixable_ids(page):
     import re
     return re.findall(r'name="song" value="(\d+)"', page)
@@ -200,7 +218,7 @@ def test_full_flow_upload_columns_scan_report_fix_pack_download(server):
     # 6. confirm and pay (demo) -> the on-screen fix pack
     status, headers, _ = call(server, f"/s/{sid}/pay", *form([("song", i) for i in ids] + [("attest", "yes")]))
     assert status == 303 and headers["Location"].endswith("/fixes")
-    status, page = text(server, f"/s/{sid}/fixes")
+    status, page = open_fixes(server, sid)
     assert status == 200
     assert "Your fixes stay here for 60 minutes, then your files are deleted for your privacy." in page
     assert "You must fill this in" in page and COMPLIANCE_TEXT in page
@@ -261,8 +279,8 @@ def test_price_on_the_page_comes_from_price_line(server):
     import html, re
     lines = json.loads(html.unescape(re.search(r'data-lines="([^"]*)"', page).group(1)))
     results = server.sessions.get(sid).results
-    from retrack.fixes import fix_kind
-    fixable = [r for r in results if fix_kind(r)]
+    from retrack.fixes import sold_kind
+    fixable = [r for r in results if sold_kind(r)]  # red songs too: worked out after checkout
     assert lines == [price_line(fixable[:n]) for n in range(len(fixable) + 1)]
 
 
@@ -371,8 +389,7 @@ class MLCDown(MockClient):
     (MLCDown, "The MLC didn’t answer"),
 ])
 def test_mlc_problems_are_explained(tmp_path, client, expected):
-    srv = start(tmp_path, client, mock=False, make_name_matcher=MockNameMatcher,
-                make_work_searcher=MockWorkSearcher)
+    srv = start(tmp_path, client, mock=False)
     try:
         sid = upload_ok(srv)
         scan(srv, sid)
@@ -389,7 +406,8 @@ def test_claude_not_set_up_is_explained_before_scanning(tmp_path):
     def no_claude():
         raise RuntimeError("no ANTHROPIC_API_KEY")
 
-    srv = start(tmp_path, mock=False, make_name_matcher=no_claude, make_work_searcher=no_claude)
+    # The AI runs only after checkout, but a missing key is reported now, not after paying.
+    srv = start(tmp_path, mock=False, make_claude=no_claude)
     try:
         sid = upload_ok(srv)
         status, _, body = scan(srv, sid, smart_names=True)
@@ -399,18 +417,19 @@ def test_claude_not_set_up_is_explained_before_scanning(tmp_path):
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
 
-def test_claude_unavailable_during_scan_is_reported(tmp_path):
+def test_claude_unavailable_after_checkout_is_reported(tmp_path):
     class Down:
-        beta = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: (_ for _ in ()).throw(ConnectionError())))
+        messages = SimpleNamespace(create=lambda **kw: (_ for _ in ()).throw(ConnectionError()))
 
-    srv = start(tmp_path, mock=False, make_name_matcher=lambda: ClaudeNameMatcher(client=Down()),
-                make_work_searcher=lambda: ClaudeWorkSearcher(client=Down()))
+    srv = start(tmp_path, mock=False, make_claude=Down)
     try:
-        sid = upload_ok(srv)
-        scan(srv, sid, smart_names=True, ai_search=True)
-        assert wait_done(srv, sid)["state"] == "done"  # the check still finishes
-        _, page = text(srv, f"/s/{sid}/results")
-        assert "The AI service didn’t answer for" in page and "Nothing is wrong with your file" in page
+        sid = scanned(srv, smart_names=True, ai_search=True)
+        pay_all(srv, sid)
+        status, page = open_fixes(srv, sid)  # the after-checkout checks still finish
+        assert status == 200 and "The AI service didn’t answer for" in page
+        unresolved = page.split('data-status="unresolved"')[1].split("</section>")[0]
+        assert "Ghost Signal" in unresolved and "Blue Hour" in unresolved  # nothing guessed: by hand
+        assert "Couldn’t finish the automatic check; here’s how to check by hand." in unresolved
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
@@ -634,7 +653,7 @@ class RecordingClaude:
 
     def __init__(self):
         self.sent = set()
-        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
+        self.messages = SimpleNamespace(create=self._create)
 
     def _create(self, **kw):
         system, content = kw["system"], kw["messages"][0]["content"]
@@ -656,20 +675,23 @@ class RecordingClaude:
 @pytest.mark.parametrize("ai_search", [False, True])
 def test_privacy_text_matches_what_a_scan_actually_sends(tmp_path, smart_names, ai_search):
     mlc, claude = RecordingMLC(), RecordingClaude()
-    srv = start(tmp_path, lambda: mlc, mock=False,
-                make_name_matcher=lambda: ClaudeNameMatcher(client=claude),
-                make_work_searcher=lambda: ClaudeWorkSearcher(client=claude))
+    srv = start(tmp_path, lambda: mlc, mock=False, make_claude=lambda: claude)
+    declared = data_flows(smart_names, ai_search)
     try:
         sid = upload_ok(srv)
         scan(srv, sid, smart_names=smart_names, ai_search=ai_search)
         assert wait_done(srv, sid)["state"] == "done"
         _, results = text(srv, f"/s/{sid}/results")
+        # The free check: exactly what's declared for it, and never anything to the AI.
+        assert mlc.sent == declared.mlc
+        assert claude.sent == declared.claude == frozenset()
+        # After checkout (every song paid for): exactly what's declared for the paid songs too.
+        pay_all(srv, sid)
+        open_fixes(srv, sid)
+        assert mlc.sent == declared.mlc_all
+        assert claude.sent == declared.claude_all
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
-
-    declared = data_flows(smart_names, ai_search)
-    assert mlc.sent == declared.mlc          # exactly what The MLC received
-    assert claude.sent == declared.claude    # exactly what Claude received
 
     # ...and the words on the page say exactly that
     import html
@@ -678,7 +700,9 @@ def test_privacy_text_matches_what_a_scan_actually_sends(tmp_path, smart_names, 
         assert heading in shown and sentence in shown
     claude_line = next(h for h, _ in privacy_items(smart_names, ai_search) if "AI service" in h)
     for kind in (ISRCS, SONG_CODES, TITLES, WRITER_NAMES):
-        assert (kind in claude_line) == (kind in declared.claude)
+        assert (kind in claude_line) == (kind in declared.claude_all)
+    if declared.claude_all:
+        assert "after checkout" in claude_line
 
 
 def test_check_page_shows_the_privacy_text_for_each_toggle_setting(server):
@@ -755,28 +779,51 @@ def test_summary_filter_shows_a_summary_of_findings(server):
     assert '<button type="button" class="chip" data-filter="all" aria-pressed="true">Summary</button>' in page
     assert ">All <" not in page
     panel = page.split('<section class="findings-panel" data-summary')[1].split("</section>")[0]
-    assert '<dt>Red</dt><dd>1 song isn’t registered anywhere at The MLC: <span class="titles">Ghost Signal</span>' in panel
-    assert "1 song is registered but not linked to your recording" in panel
+    # The free check runs no AI search, so the red songs aren't split into cases yet.
+    assert ('<dt>Red</dt><dd>2 songs have no match for their ISRCs yet: '
+            '<span class="titles">Ghost Signal, Blue Hour</span>') in panel
+    assert "not linked to your recording" not in panel
     assert "1 song is only partly claimed" in panel and "Paper Crowns" in panel
     assert '<dt>Green</dt><dd>1 song is all set' in panel
 
 
-def test_songs_needing_ai_search_get_a_callout_with_the_checkbox(server):
-    sid = scanned(server)  # AI search off: the two red songs can't be placed yet
+def test_red_songs_are_sold_as_needs_fixing_before_any_ai(server):
+    sid = scanned(server, ai_search=True)
     _, page = text(server, f"/s/{sid}/results")
-    box = page.split('<div class="needs-search"')[1].split("</form>")[0]
-    assert "2 songs need AI search first" in box
-    assert "Ghost Signal" in box and "Blue Hour" in box
+    fix_list = page.split('id="fix-form"')[1].split("</form>")[0]
+    for title in ("Ghost Signal", "Blue Hour"):
+        row = fix_list.split(title)[1].split("</li>")[0]
+        assert "Needs fixing: we’ll work out exactly how after checkout." in row
+    assert len(fixable_ids(page)) == 4  # the two red songs plus the two yellow ones
+    assert 'class="needs-search"' not in page  # no AI callout before paying
+
+
+def test_songs_needing_ai_search_get_a_callout_with_the_checkbox(server):
+    sid = scanned(server)  # AI search off: after checkout the two red songs can't be placed
+    pay_all(server, sid)
+    _, page = open_fixes(server, sid)
+    group = page.split('data-status="unresolved"')[1].split("</section>")[0]
+    assert "Ghost Signal" in group and "Blue Hour" in group
+    box = group.split('<div class="needs-search"')[1].split("</form>")[0]
+    assert "2 songs need AI search to be worked out" in box
     assert 'name="ai_search" value="on" required' in box  # ticking it is the OK to send data
-    assert "an AI service" in box and "Check these 2 songs again" in box
-    assert page.index('class="needs-search"') < page.index('id="fix-form"')  # seen before the list
+    assert "an AI service" in box and "Work out these 2 songs" in box
+    assert "AI search was off" in group  # says why, not "couldn't finish"
 
 
 def test_recheck_without_the_box_ticked_sends_nothing(server):
     sid = scanned(server)
+    pay_all(server, sid)
+    open_fixes(server, sid)
     status, page = text(server, f"/s/{sid}/recheck", data=b"", content_type="application/x-www-form-urlencoded")
     assert status == 400 and "Tick AI search first" in page
     assert server.sessions.get(sid).settings["ai_search"] is False
+
+
+def test_recheck_needs_payment(server):
+    sid = scanned(server)
+    status, _, _ = call(server, f"/s/{sid}/recheck", *form([("ai_search", "on")]))
+    assert status == 402
 
 
 def test_recheck_checks_only_the_red_songs_with_ai_search(tmp_path):
@@ -788,10 +835,14 @@ def test_recheck_checks_only_the_red_songs_with_ai_search(tmp_path):
             return super().search_recordings(isrc)
 
     # real mode (not sample data), with offline stand-ins for the AI, so the privacy text is the real one
-    srv = start(tmp_path, Counting, mock=False, make_name_matcher=MockNameMatcher,
-                make_work_searcher=MockWorkSearcher)
+    srv = start(tmp_path, Counting, mock=False, make_claude=lambda: object(),
+                make_name_matcher=lambda client: MockNameMatcher(),
+                make_work_searcher=lambda client: MockWorkSearcher())
     try:
         sid = scanned(srv)
+        assert len(checked) == 5
+        pay_all(srv, sid)
+        open_fixes(srv, sid)  # AI search off: nothing runs, the red songs wait for the box
         assert len(checked) == 5
         status, headers, _ = call(srv, f"/s/{sid}/recheck", *form([("ai_search", "on")]))
         assert status == 303 and headers["Location"].endswith("/progress")
@@ -799,9 +850,9 @@ def test_recheck_checks_only_the_red_songs_with_ai_search(tmp_path):
         assert sorted(checked[5:]) == ["QZABC2400004", "QZABC2400005"]  # just the two red songs
         s = srv.sessions.get(sid)
         assert s.settings["ai_search"] is True  # so "what left this computer" now says so
-        _, page = text(srv, f"/s/{sid}/results")
-        assert 'class="needs-search"' not in page  # both songs can now be fixed
-        assert len(fixable_ids(page)) == 4
+        _, page = open_fixes(srv, sid)
+        assert 'class="needs-search"' not in page  # both songs are placed now
+        assert 'data-status="register"' in page and 'data-status="link"' in page
         assert "song titles and writer names" in page  # the privacy panel follows the new setting
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()

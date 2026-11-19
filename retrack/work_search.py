@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass, field
 
 from .mlc_client import MLCError
-from .name_matcher import MODEL
+from .ai import MODEL  # one shared model for every Claude call
 
 # Keeps API costs sane: at most this many MLC searches per song (including
 # the first, exact one), and at most this many results judged per song.
@@ -232,20 +232,15 @@ class ClaudeWorkSearcher:
     def _ask(self, system, schema, text):
         """One structured-JSON question to Claude. Returns a dict, or None on any failure."""
         try:
-            response = self.client.beta.messages.create(
+            response = self.client.messages.create(
                 model=self.model,
-                max_tokens=4096,
-                output_config={
-                    "effort": "low",  # short, well-defined questions don't need deep thinking
-                    "format": {"type": "json_schema", "schema": schema},
-                },
-                # If the main model declines, let the API retry on a fallback model.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
+                max_tokens=1024,  # a few short searches or one verdict, as JSON
+                # Structured output: the reply must match the schema, so it always parses.
+                output_config={"format": {"type": "json_schema", "schema": schema}},
                 system=system,
                 messages=[{"role": "user", "content": text}],
             )
-        except Exception:  # network down, bad key, rate limit...
+        except Exception:  # network down, bad key, rate limit, AI limit reached...
             # Don't crash a whole catalog run over one song.
             return None
         if response.stop_reason != "end_turn":  # refused or cut off: no usable answer

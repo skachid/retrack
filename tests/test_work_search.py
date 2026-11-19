@@ -176,7 +176,7 @@ class FakeAnthropic:
     def __init__(self, answer=None, stop_reason="end_turn", error=None):
         self.calls, self.sent = 0, []
         self.answer, self.stop_reason, self.error = answer, stop_reason, error
-        self.beta = SimpleNamespace(messages=SimpleNamespace(create=self._create))
+        self.messages = SimpleNamespace(create=self._create)
 
     def _create(self, **kwargs):
         self.calls += 1

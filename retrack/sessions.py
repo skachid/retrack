@@ -22,6 +22,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .ai import OrderBudget
+
 DEFAULT_ROOT = Path(tempfile.gettempdir()) / "retrack-sessions"
 SESSION_SECONDS = 60 * 60  # the whole visit, payment included: then everything is deleted
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{22}$")  # secrets.token_urlsafe(16) makes 22 characters
@@ -40,7 +42,7 @@ class Session:
     import_result: object = None  # importer.ImportResult
     rows: list = field(default_factory=list)     # CatalogRows, in catalog order
     results: list = field(default_factory=list)  # checker Results, one per row
-    todo: list = field(default_factory=list)     # row numbers this run checks (all, or a re-check)
+    todo: list = field(default_factory=list)     # row numbers this run checks (all, or paid songs)
     state: str = "columns"  # columns -> ready -> running -> done | failed
     done: int = 0
     error: tuple = None     # (title, message) when state == "failed"
@@ -53,6 +55,11 @@ class Session:
     paid_songs: list = field(default_factory=list)  # result indexes the user has paid for
     orders_placed: int = 0
     template_note: str = ""  # e.g. songs left out of a filled-in MLC template, and why
+    # After checkout: the AI checks run on the paid songs only (web.py, "finish" phase)
+    phase: str = "scan"      # what the running job is: "scan" (free check) or "finish" (after checkout)
+    finished: set = field(default_factory=set)  # paid songs whose after-checkout checks are done
+    ai_budget: OrderBudget = field(default_factory=OrderBudget)  # AI calls this session may still make
+    finish_problem: str = ""  # why some paid songs couldn't be worked out, for the fix page
 
     @property
     def total(self):
