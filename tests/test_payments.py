@@ -418,6 +418,63 @@ def test_fix_page_has_tabs_and_short_rows_like_the_results_page(paid):
     assert "bulk_match.csv" in link
 
 
+def test_each_fix_group_shows_songs_then_steps_then_the_file(paid):
+    srv, sid = paid
+    _, page = text(srv, f"/s/{sid}/fixes")
+    for kind in ("register", "link"):
+        group = page.split(f'data-status="{kind}"')[1].split("</section>")[0]
+        songs, steps, file_ = (group.index('<details class="song fix-card">'), group.index("How to do it"),
+                               group.index("File for The MLC"))
+        assert songs < steps < file_, kind
+
+
+def test_steps_are_short_lines_with_the_full_text_under_more_detail(paid):
+    from html import escape
+    from retrack.web_pages import STEPS_FOR
+    srv, sid = paid
+    _, page = text(srv, f"/s/{sid}/fixes")
+    assert page.count('<details class="more"><summary>More detail</summary>') == 3  # one per group
+    for steps in STEPS_FOR.values():
+        for verb, rest, detail in steps:
+            assert f"<li><strong>{escape(verb)}</strong>{escape(rest)}</li>" in page
+            assert f"<li>{escape(detail)}</li>" in page  # the full explanation is still there
+            assert len(verb + rest) <= 60, verb  # short enough for one line
+
+
+def test_download_label_is_short_but_the_file_keeps_its_date(paid):
+    from retrack.fixes import fixes_workbook_name
+    srv, sid = paid
+    _, page = text(srv, f"/s/{sid}/fixes")
+    assert ">Download fixes (.xlsx)</a>" in page
+    _, headers, _ = call(srv, f"/s/{sid}/fixes.xlsx")
+    assert fixes_workbook_name() in headers["Content-Disposition"]
+
+
+def test_template_upload_is_an_optional_time_saver(paid):
+    srv, sid = paid
+    _, page = text(srv, f"/s/{sid}/fixes")
+    register = page.split('data-status="register"')[1].split("</section>")[0]
+    assert "Lots of songs? Upload your MLC template and Retrack fills a copy." in register
+    assert 'class="mlc-file mlc-file--optional"' in register
+    # Retrack never offers a copy of The MLC's template; only the user's own copy, once filled.
+    assert "bulk_work_registration.xlsx" not in page
+
+
+def test_kinds_with_no_songs_get_no_tile_tab_or_section(paid):
+    from retrack import web_pages as pages
+    from retrack.fixes import plan_fixes
+    srv, sid = paid
+    session = srv.sessions.get(sid)
+    plan = plan_fixes([session.results[i] for i in session.paid_songs])
+    assert plan.register and plan.link and plan.claim
+    plan.link = []
+    page = pages.fixes_page(session, plan, mock=True)
+    assert 'data-filter="link"' not in page and 'data-status="link"' not in page
+    assert "<dt>Link</dt>" not in page and "Registered, not linked" not in page
+    for kind, head in (("register", "Register"), ("claim", "Claim")):
+        assert f'data-filter="{kind}"' in page and f"<dt>{head}</dt>" in page
+
+
 def test_bulk_match_csv_is_exactly_the_mlc_format(paid):
     srv, sid = paid
     status, headers, data = call(srv, f"/s/{sid}/bulk_match.csv")

@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .checker import GREEN, RED
 from .compliance import ATTESTATION_TEXT, COMPLIANCE_TEXT, NEVER_TEXT
-from .fixes import (CLAIM, FIX_PRICE_USD, LINK, REGISTER, bulk_match_name, fix_kind, fixes_workbook_name,
+from .fixes import (CLAIM, FIX_PRICE_USD, LINK, REGISTER, bulk_match_name, fix_kind,
                     price_line)
 from .payments import DEMO, DEMO_BANNER, TEST, TEST_BANNER
 from .importer import FIELDS, LOW_CONFIDENCE, REQUIRED, SAMPLE_ROWS, column_letter
@@ -569,29 +569,41 @@ MUST_FIELDS = {
     REGISTER: ["Writer IPI", "Writer role code", "Publisher name", "Publisher IPI", "Collection share"],
     LINK: ["Confirm this is your song"],
 }
+# Each step: (the verb, set bold; the rest of its one short line; the full explanation).
+# The short lines are always visible; the full ones sit under one "More detail" per section.
 STEPS_FOR = {
     REGISTER: [
-        "Download Retrack_Fixes and open the Register tab.",
-        "Fill in every yellow cell: writer IPIs, role codes, publisher names and IPIs, and collection "
-        "shares. Retrack never guesses these. Enter publishing information only for shares you control.",
-        "Log in to your MLC Portal yourself, go to Works Registration, then Bulk Registration Tool, and "
-        "download the Bulk Work Registration template.",
-        "Copy the rows into that template, without moving or deleting its columns, or upload the template "
-        "here and Retrack fills a copy for you.",
-        "Upload it in the Bulk Registration Tool. If a writer is self-administered with no publisher IPI, "
-        "register that song on its own in the Portal instead.",
+        ("Download your fixes", " and open the Register tab.",
+         "Download Retrack_Fixes and open the Register tab."),
+        ("Fill in every yellow cell", ": the ownership details.",
+         "Fill in every yellow cell: writer IPIs, role codes, publisher names and IPIs, and collection "
+         "shares. Retrack never guesses these. Enter publishing information only for shares you control."),
+        ("Download the MLC template", " from your MLC Portal.",
+         "Log in to your MLC Portal yourself, go to Works Registration, then Bulk Registration Tool, and "
+         "download the Bulk Work Registration template."),
+        ("Copy your rows", " into the template, columns unmoved.",
+         "Copy the rows into that template, without moving or deleting its columns, or upload the template "
+         "here and Retrack fills a copy for you."),
+        ("Upload it", " in the Bulk Registration Tool.",
+         "Upload it in the Bulk Registration Tool. If a writer is self-administered with no publisher IPI, "
+         "register that song on its own in the Portal instead."),
     ],
     LINK: [
-        "Check that the MLC title and writers really are your song. Retrack only suggests the match.",
-        "For a few songs: in your MLC Portal, open the Matching Tool, search for your recording and "
-        "propose the match to the MLC song code shown.",
-        "For many songs: download the bulk match file here, delete any row you didn’t confirm, add your "
-        "member name to the front of the file name, and email it to bulk.matching@themlc.com. The MLC "
-        "says it takes 30 to 90 days.",
+        ("Check the match", " really is your song.",
+         "Check that the MLC title and writers really are your song. Retrack only suggests the match."),
+        ("Propose the match", " in the Portal’s Matching Tool.",
+         "For a few songs: in your MLC Portal, open the Matching Tool, search for your recording and "
+         "propose the match to the MLC song code shown."),
+        ("Email the bulk match file", " instead, for many songs.",
+         "For many songs: download the bulk match file here, delete any row you didn’t confirm, add your "
+         "member name to the front of the file name, and email it to bulk.matching@themlc.com. The MLC "
+         "says it takes 30 to 90 days."),
     ],
     CLAIM: [
-        "Log in to your MLC Portal yourself and open the MLC song code shown.",
-        "Do the steps listed for the song, then claim your share. Only you know how big it is.",
+        ("Open the MLC song code", " in your MLC Portal.",
+         "Log in to your MLC Portal yourself and open the MLC song code shown."),
+        ("Do the song’s own steps", ", then claim your share.",
+         "Do the steps listed for the song, then claim your share. Only you know how big it is."),
     ],
 }
 KIND_HEADS = {REGISTER: "Register", LINK: "Link", CLAIM: "Claim"}
@@ -642,9 +654,8 @@ def _fix_card(r):
         must = ["Your share to claim"] + [f"IPI for {w}" for w in r.missing_writers]
         steps = r.fixes  # this song's own steps, from checker.py
     known = sum(1 for _, v in filled if v)
-    gist = f"Retrack filled in {_plural(known, 'field')}; you fill in {len(must)}."
-    if steps:
-        gist += f" {_plural(len(steps), 'step')} for this song."
+    gist = f"Retrack filled in {_plural(known, 'field')}; you fill in {len(must)}"
+    gist += f", plus {_plural(len(steps), 'step')}." if steps else "."
     own = "".join(f"<li>{escape(x)}</li>" for x in steps)
     return f"""<details class="song fix-card">
         <summary>
@@ -655,34 +666,48 @@ def _fix_card(r):
         </summary>
         <div class="song-body">
           <div class="fix-facts">
-            <div><h4>What Retrack filled in</h4><dl class="facts">{_facts(filled)}</dl></div>
-            <div><h4>What you fill in</h4><dl class="facts must-list">{_must(must)}</dl></div>
+            <div><h3>What Retrack filled in</h3><dl class="facts">{_facts(filled)}</dl></div>
+            <div><h3>What you fill in</h3><dl class="facts must-list">{_must(must)}</dl></div>
           </div>
-          {f'<h4>For this song</h4><ol class="song-steps">{own}</ol>' if own else ""}
+          {f'<h3>For this song</h3><ol class="song-steps">{own}</ol>' if own else ""}
         </div>
       </details>"""
 
 
+def _how_to(kind):
+    """Short steps, each one line starting with a bold verb, then one "More detail"
+    disclosure with the full explanation of every step (a <details>: no script needed)."""
+    short = "".join(f"<li><strong>{escape(verb)}</strong>{escape(rest)}</li>" for verb, rest, _ in STEPS_FOR[kind])
+    full = "".join(f"<li>{escape(detail)}</li>" for _, _, detail in STEPS_FOR[kind])
+    return f"""<div class="how">
+          <h3 class="steps-head">How to do it</h3>
+          <p class="group-lead">{KIND_LEADS[kind]}</p>
+          <ol class="how-to">{short}</ol>
+          <details class="more"><summary>More detail</summary><ol class="how-to-full">{full}</ol></details>
+        </div>"""
+
+
 def _mlc_files(session, kind, template_note):
-    """The file for The MLC that belongs to this kind of fix, inside its own tab."""
+    """The file for The MLC that belongs to this kind of fix, after its steps."""
     if kind == LINK:
         return (f'<div class="mlc-file"><h3 class="steps-head">File for The MLC</h3>'
                 f'<p><a href="/s/{session.id}/bulk_match.csv" download data-no-warn>{escape(bulk_match_name())}</a></p>'
                 "<p class=\"helper\">The links in The MLC’s exact Bulk Match format. You’d need it to link many "
                 "songs at once by email, instead of one by one in the Matching Tool.</p></div>")
     if kind == REGISTER:
+        # Optional: Retrack never supplies the template itself; the user brings their own copy.
         copy_link = ""
         if session_template_ready(session):
-            copy_link = (f'<p><a class="btn btn--quiet" href="/s/{session.id}/bulk_work_registration.xlsx" '
+            copy_link = (f'<p><a class="btn btn--quiet btn--small" href="/s/{session.id}/bulk_work_registration.xlsx" '
                          'download data-no-warn>Download your filled-in template</a></p>')
         note = f'<p class="helper">{escape(template_note)}</p>' if template_note else ""
-        return f"""<div class="mlc-file"><h3 class="steps-head">File for The MLC</h3>
+        return f"""<div class="mlc-file mlc-file--optional"><h3 class="steps-head">File for The MLC</h3>
           <form method="post" action="/s/{session.id}/template" enctype="multipart/form-data">
-            <label for="template">Upload your MLC Bulk Work template (.xlsx)</label>
+            <label for="template">Lots of songs? Upload your MLC template and Retrack fills a copy.</label>
+            <p id="template-help" class="helper">Optional. Download it from your MLC Portal (Works Registration,
+            then Bulk Registration Tool). Retrack leaves your original alone.</p>
             <input type="file" id="template" name="template" accept=".xlsx" required aria-describedby="template-help">
-            <p id="template-help" class="helper">Get it from your MLC Portal: Works Registration, then Bulk
-            Registration Tool, then download the template. Retrack fills a copy and leaves your original alone.</p>
-            <button class="btn btn--quiet" type="submit">Fill in my template</button>
+            <button class="btn btn--quiet btn--small" type="submit">Fill in my template</button>
           </form>{note}{copy_link}</div>"""
     return ""
 
@@ -704,23 +729,23 @@ def fixes_page(session, plan, mock=False, template_note="", error=None, seconds_
                lifetime=SESSION_SECONDS):
     all_kinds = ((REGISTER, plan.register), (LINK, plan.link), (CLAIM, plan.claim))
     kinds = [(kind, songs) for kind, songs in all_kinds if songs]
+    # Only kinds with songs: no "0" tiles, tabs or sections.
     ledger = "".join(
         f'<div class="is-{KIND_COLOURS[kind]}"><dt>{KIND_HEADS[kind]}</dt>'
         f'<dd><span class="figure">{len(songs)}</span><span class="meaning">{KIND_MEANINGS[kind]}</span></dd></div>'
-        for kind, songs in all_kinds)
+        for kind, songs in kinds)
     groups = ""
     for kind, songs in kinds:
-        steps = "".join(f"<li>{escape(x)}</li>" for x in STEPS_FOR[kind])
+        # Songs first, then how to do it, then the file for The MLC.
         groups += f"""
-      <section class="group is-{KIND_COLOURS[kind]}" data-status="{kind}" aria-labelledby="group-{kind}">
+      <section class="group fix-group is-{KIND_COLOURS[kind]}" data-status="{kind}" aria-labelledby="group-{kind}">
         <div class="group-head"><h2 id="group-{kind}">{KIND_HEADS[kind]}</h2>
           <span class="count">{_plural(len(songs), "song")}</span></div>
+        {"".join(_fix_card(r) for r in songs)}
         <div class="fix-how">
-          <div><p class="group-lead">{KIND_LEADS[kind]}</p>
-            <h3 class="steps-head">How to do it</h3><ol class="how-to">{steps}</ol></div>
+          {_how_to(kind)}
           {_mlc_files(session, kind, template_note)}
         </div>
-        {"".join(_fix_card(r) for r in songs)}
       </section>"""
 
     # One warning box at the top, with the downloads in it: so it's both "at the top" and
@@ -739,11 +764,11 @@ def fixes_page(session, plan, mock=False, template_note="", error=None, seconds_
       <div class="vanish keep" role="note">
         <div><p>{escape(keep_text(lifetime))}</p>{_time_left(session, seconds_left)}</div>
         <div class="actions">
-          <a class="btn" href="/s/{session.id}/fixes.xlsx" download data-no-warn>Download {escape(fixes_workbook_name())}</a>
-          <button type="button" class="btn btn--quiet" data-print hidden>Print</button>
+          <a class="btn btn--small" href="/s/{session.id}/fixes.xlsx" download data-no-warn>Download fixes (.xlsx)</a>
+          <button type="button" class="btn btn--quiet btn--small" data-print hidden>Print</button>
         </div>
       </div>
-      <dl class="ledger" aria-label="Fixes by type">{ledger}</dl>
+      <dl class="ledger ledger--fit" aria-label="Fixes by type">{ledger}</dl>
       {_fix_filters(kinds)}
       <div class="song-list">{groups}</div>
       <p class="compliance-box">{escape(COMPLIANCE_TEXT)}</p>

@@ -76,6 +76,7 @@ strong, b { font-weight: 600; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
 .btn--quiet { background: transparent; color: var(--color-ink); }
 .btn--quiet:hover { background: var(--color-paper-2); }
+.btn--small { min-height: 40px; padding: 0 var(--space-md); font-size: var(--text-sm); }
 
 /* Messages */
 .alert { margin-top: var(--space-md); padding: var(--space-lg); border: var(--rule-hair) solid var(--color-error); border-left-width: 4px; background: var(--color-paper-2); }
@@ -244,17 +245,35 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
 .vanish.keep p { max-width: 60ch; }
 .vanish.keep .actions { margin-top: 0; }
 .vanish.keep [hidden] { display: none; }
-.fix-how { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--gap-columns); padding-block: var(--space-md) var(--space-lg); border-bottom: var(--rule-hair) solid var(--color-rule); }
-.group-lead { color: var(--color-ink-2); }
-.steps-head, .fix-card h4 { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; letter-spacing: normal; margin-top: var(--space-md); }
-.how-to, .song-steps { margin-top: var(--space-xs); padding-left: 1.3em; max-width: 70ch; font-size: var(--text-sm); }
+/* Only the kinds with songs get a tile, so the row fits 1, 2 or 3 */
+.ledger--fit { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+/* After the song rows: the steps, then the file for The MLC */
+.fix-how { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--gap-columns); align-items: start; padding-block: var(--space-lg) var(--space-xl); }
+.group-lead { margin-top: var(--space-2xs); color: var(--color-ink-2); font-size: var(--text-sm); }
+.steps-head, .fix-card h3 { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; letter-spacing: normal; margin-top: var(--space-md); }
+.how .steps-head { margin-top: 0; }
+.how-to, .song-steps, .how-to-full { margin-top: var(--space-xs); padding-left: 1.3em; max-width: 70ch; }
+.how-to li + li { margin-top: var(--space-2xs); }
+.how-to strong { font-weight: 600; }
+.song-steps, .how-to-full { font-size: var(--text-sm); }
+.more { margin-top: var(--space-sm); font-size: var(--text-sm); }
+.more summary { display: inline-block; cursor: pointer; color: var(--color-ink-2); text-decoration: underline; text-decoration-color: var(--color-accent); text-underline-offset: 0.18em; }
+.more summary:hover { text-decoration-thickness: 2px; }
+.more summary:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.more summary::-webkit-details-marker { display: none; }
+.how-to-full { color: var(--color-ink-2); }
+.how-to-full li + li { margin-top: var(--space-xs); }
 .mlc-file { font-size: var(--text-sm); }
-.mlc-file > :first-child + * { margin-top: var(--space-sm); }
+.mlc-file .steps-head { margin-top: 0; }
 .mlc-file p, .mlc-file form > * + * { margin-top: var(--space-xs); }
 .mlc-file label { display: block; font-weight: 600; }
+/* The template is an optional time-saver: muted text, no box, a small quiet button */
+.mlc-file--optional, .mlc-file--optional .steps-head, .mlc-file--optional label { color: var(--color-ink-2); }
+.mlc-file--optional label { font-weight: 500; }
+.mlc-file--optional input[type="file"] { max-width: 100%; font-size: var(--text-sm); }
 .fixes .compliance-box { margin-top: var(--space-2xl); }
 .fix-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap-columns); }
-.fix-facts h4 { margin-bottom: var(--space-xs); }
+.fix-facts h3 { margin-bottom: var(--space-xs); }
 /* "You must fill this in": highlighted, and said in words, not only shown by colour */
 .must-list { background: none; padding: 0; grid-template-columns: minmax(0, 1fr); }
 .must { padding: var(--space-xs) var(--space-sm); background: var(--color-must); border: var(--rule-hair) solid var(--color-ink); }
@@ -326,7 +345,11 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
   .bar nav, .steps, .steps-short, .sample-banner ~ .bar .steps, .head-actions, .filters, .fix, .privacy .delete-form, .import-notes { display: none !important; }
   .group[hidden] { display: block !important; }
   /* The fix page on paper: the fixes and the warning; no buttons, forms or downloads */
-  .fixes .actions, .fixes .mlc-file form, .fixes .privacy { display: none !important; }
+  .fixes .actions, .fixes .mlc-file--optional, .fixes .privacy { display: none !important; }
+  /* Paper can't open a disclosure: print the full steps, without the "More detail" line */
+  .more > summary { display: none; }
+  .more::details-content, .fixes .song::details-content { content-visibility: visible; }
+  .fixes .song .gist { display: none; }
   .fix-card { break-inside: avoid; }
   .must { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

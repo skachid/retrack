@@ -102,14 +102,15 @@
       if (e.target.closest("[data-print]")) window.print();
     });
 
-    // Paper can't be clicked: open every row while printing.
+    // Paper can't be clicked: open every row (and every "More detail") while printing.
     var openBefore = [];
+    var openable = ".song, .more";
     window.addEventListener("beforeprint", function () {
-      openBefore = Array.prototype.filter.call(results.querySelectorAll(".song"), function (r) { return r.open; });
-      results.querySelectorAll(".song").forEach(function (r) { r.open = true; });
+      openBefore = Array.prototype.filter.call(results.querySelectorAll(openable), function (r) { return r.open; });
+      results.querySelectorAll(openable).forEach(function (r) { r.open = true; });
     });
     window.addEventListener("afterprint", function () {
-      results.querySelectorAll(".song").forEach(function (r) { r.open = openBefore.indexOf(r) !== -1; });
+      results.querySelectorAll(openable).forEach(function (r) { r.open = openBefore.indexOf(r) !== -1; });
     });
   }
 
