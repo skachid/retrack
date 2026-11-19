@@ -237,33 +237,28 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
 .fix-list.paid .fix-kind { font-weight: 600; }
 .fix-paid { padding-block: var(--space-sm); }
 
-/* The fix page: one group per fix type, one card per song */
+/* The fix page: the same tabs and song rows as the results page, one group per fix type */
 .vanish { padding: var(--space-sm) var(--space-md); border: var(--rule-hair) solid var(--color-ink); font-size: var(--text-sm); font-weight: 600; }
 .vanish .time-left { margin-top: var(--space-2xs); font-weight: 400; font-variant-numeric: tabular-nums; }
-.fixes h1 { margin-top: var(--space-xl); }
-.downloads { margin-top: var(--space-xl); padding-top: var(--space-lg); border-top: 3px double var(--color-rule-2); }
-.downloads h2, .submit h2 { font-size: var(--text-xl); }
-.downloads .vanish { margin-top: var(--space-md); }
-.fix-group { margin-top: var(--section-gap-s); padding-top: var(--space-lg); border-top: 3px double var(--color-rule-2); }
-.fix-group .group-head { border-bottom-color: var(--color-ink); }
-.fix-group .group-head h2 { font-size: var(--text-section); }
-.steps-head, .fix-card h4 { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; letter-spacing: normal; margin-top: var(--space-lg); }
-.how-to, .song-steps { margin-top: var(--space-xs); padding-left: 1.3em; max-width: 70ch; }
-.fix-card { margin-top: var(--space-xl); padding-top: var(--space-md); border-top: var(--rule-hair) solid var(--color-ink); }
-.fix-card h3 { font-size: var(--text-title); }
-.fix-card .artist { font-size: var(--text-sm); color: var(--color-ink-2); }
+.vanish.keep { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-md); margin-top: var(--space-lg); padding: var(--space-md); }
+.vanish.keep p { max-width: 60ch; }
+.vanish.keep .actions { margin-top: 0; }
+.vanish.keep [hidden] { display: none; }
+.fix-how { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--gap-columns); padding-block: var(--space-md) var(--space-lg); border-bottom: var(--rule-hair) solid var(--color-rule); }
+.group-lead { color: var(--color-ink-2); }
+.steps-head, .fix-card h4 { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; letter-spacing: normal; margin-top: var(--space-md); }
+.how-to, .song-steps { margin-top: var(--space-xs); padding-left: 1.3em; max-width: 70ch; font-size: var(--text-sm); }
+.mlc-file { font-size: var(--text-sm); }
+.mlc-file > :first-child + * { margin-top: var(--space-sm); }
+.mlc-file p, .mlc-file form > * + * { margin-top: var(--space-xs); }
+.mlc-file label { display: block; font-weight: 600; }
+.fixes .compliance-box { margin-top: var(--space-2xl); }
 .fix-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap-columns); }
 .fix-facts h4 { margin-bottom: var(--space-xs); }
 /* "You must fill this in": highlighted, and said in words, not only shown by colour */
 .must-list { background: none; padding: 0; grid-template-columns: minmax(0, 1fr); }
 .must { padding: var(--space-xs) var(--space-sm); background: var(--color-must); border: var(--rule-hair) solid var(--color-ink); }
 .must dd { font-weight: 600; color: var(--color-ink); }
-.submit { margin-top: var(--section-gap-s); padding-top: var(--space-lg); border-top: 3px double var(--color-rule-2); }
-.submit-list { list-style: none; padding: 0; margin: var(--space-lg) 0 0; display: grid; gap: var(--space-xl); }
-.submit-list li { margin: 0; }
-.submit-list p { margin-top: var(--space-2xs); color: var(--color-ink-2); font-size: var(--text-sm); max-width: 70ch; }
-.submit-list form { display: grid; gap: var(--space-xs); justify-items: start; }
-.submit-list label { font-weight: 600; }
 .privacy-list.single { grid-template-columns: minmax(0, 1fr); }
 
 /* Homepage sections */
@@ -309,7 +304,7 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
   .map-row { grid-template-columns: minmax(0, 1fr); gap: var(--space-xs); }
   .fix-row { grid-template-columns: auto minmax(0, 1fr); }
   .fix-row .fix-kind { grid-column: 2; }
-  .fix-facts { grid-template-columns: minmax(0, 1fr); }
+  .fix-facts, .fix-how { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 40rem) {
   .steps { display: none; }
@@ -331,8 +326,7 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
   .bar nav, .steps, .steps-short, .sample-banner ~ .bar .steps, .head-actions, .filters, .fix, .privacy .delete-form, .import-notes { display: none !important; }
   .group[hidden] { display: block !important; }
   /* The fix page on paper: the fixes and the warning; no buttons, forms or downloads */
-  .fixes .actions, .fixes .submit form, .fixes .privacy { display: none !important; }
-  .fix-group { break-before: auto; margin-top: var(--space-xl); }
+  .fixes .actions, .fixes .mlc-file form, .fixes .privacy { display: none !important; }
   .fix-card { break-inside: avoid; }
   .must { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

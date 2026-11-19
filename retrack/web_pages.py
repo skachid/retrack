@@ -577,7 +577,7 @@ STEPS_FOR = {
         "Log in to your MLC Portal yourself, go to Works Registration, then Bulk Registration Tool, and "
         "download the Bulk Work Registration template.",
         "Copy the rows into that template, without moving or deleting its columns, or upload the template "
-        "below and Retrack fills a copy for you.",
+        "here and Retrack fills a copy for you.",
         "Upload it in the Bulk Registration Tool. If a writer is self-administered with no publisher IPI, "
         "register that song on its own in the Portal instead.",
     ],
@@ -585,7 +585,7 @@ STEPS_FOR = {
         "Check that the MLC title and writers really are your song. Retrack only suggests the match.",
         "For a few songs: in your MLC Portal, open the Matching Tool, search for your recording and "
         "propose the match to the MLC song code shown.",
-        "For many songs: download the bulk match file below, delete any row you didn’t confirm, add your "
+        "For many songs: download the bulk match file here, delete any row you didn’t confirm, add your "
         "member name to the front of the file name, and email it to bulk.matching@themlc.com. The MLC "
         "says it takes 30 to 90 days.",
     ],
@@ -600,6 +600,10 @@ KIND_LEADS = {
     LINK: "Registered, but not linked to your recording: link them.",
     CLAIM: "Registered, but something’s missing: claim or fix them in the Portal.",
 }
+# Short meanings for the count row at the top, like Red/Yellow/Green on the results page.
+KIND_MEANINGS = {REGISTER: "Not at The MLC yet", LINK: "Registered, not linked", CLAIM: "Registered, something missing"}
+# The verdict colour behind each kind of fix (register and link are red songs, claim is yellow).
+KIND_COLOURS = {REGISTER: "red", LINK: "red", CLAIM: "yellow"}
 
 
 def _facts(pairs):
@@ -610,7 +614,13 @@ def _must(labels):
     return "".join(f'<div class="must"><dt>{escape(k)}</dt><dd>You must fill this in</dd></div>' for k in labels)
 
 
+def _plural(n, word):
+    return f"{n} {word if n == 1 else word + 's'}"
+
+
 def _fix_card(r):
+    """One song as a closed <details> row, like the results page: the summary line says
+    how much is filled in and how much is left; opening it shows every field."""
     kind = fix_kind(r)
     if kind == REGISTER:
         filled = [("Work title", r.row.title), ("Writers", ", ".join(r.row.writers)),
@@ -631,80 +641,112 @@ def _fix_card(r):
                   ("Your writers missing there", ", ".join(r.missing_writers) or "None")]
         must = ["Your share to claim"] + [f"IPI for {w}" for w in r.missing_writers]
         steps = r.fixes  # this song's own steps, from checker.py
+    known = sum(1 for _, v in filled if v)
+    gist = f"Retrack filled in {_plural(known, 'field')}; you fill in {len(must)}."
+    if steps:
+        gist += f" {_plural(len(steps), 'step')} for this song."
     own = "".join(f"<li>{escape(x)}</li>" for x in steps)
-    return f"""<article class="fix-card">
-        <h3>{escape(r.row.title)}</h3>
-        <p class="artist">{escape(r.row.artist)}</p>
-        <div class="fix-facts">
-          <div><h4>What Retrack filled in</h4><dl class="facts">{_facts(filled)}</dl></div>
-          <div><h4>What you fill in</h4><dl class="facts must-list">{_must(must)}</dl></div>
+    return f"""<details class="song fix-card">
+        <summary>
+          <span class="song-name"><span class="title">{escape(r.row.title)}</span>
+            <span class="artist">{escape(r.row.artist)}</span></span>
+          <span class="gist">{escape(gist)}</span>
+          <span class="toggle" aria-hidden="true"></span>
+        </summary>
+        <div class="song-body">
+          <div class="fix-facts">
+            <div><h4>What Retrack filled in</h4><dl class="facts">{_facts(filled)}</dl></div>
+            <div><h4>What you fill in</h4><dl class="facts must-list">{_must(must)}</dl></div>
+          </div>
+          {f'<h4>For this song</h4><ol class="song-steps">{own}</ol>' if own else ""}
         </div>
-        {f'<h4>For this song</h4><ol class="song-steps">{own}</ol>' if own else ""}
-      </article>"""
+      </details>"""
+
+
+def _mlc_files(session, kind, template_note):
+    """The file for The MLC that belongs to this kind of fix, inside its own tab."""
+    if kind == LINK:
+        return (f'<div class="mlc-file"><h3 class="steps-head">File for The MLC</h3>'
+                f'<p><a href="/s/{session.id}/bulk_match.csv" download data-no-warn>{escape(bulk_match_name())}</a></p>'
+                "<p class=\"helper\">The links in The MLC’s exact Bulk Match format. You’d need it to link many "
+                "songs at once by email, instead of one by one in the Matching Tool.</p></div>")
+    if kind == REGISTER:
+        copy_link = ""
+        if session_template_ready(session):
+            copy_link = (f'<p><a class="btn btn--quiet" href="/s/{session.id}/bulk_work_registration.xlsx" '
+                         'download data-no-warn>Download your filled-in template</a></p>')
+        note = f'<p class="helper">{escape(template_note)}</p>' if template_note else ""
+        return f"""<div class="mlc-file"><h3 class="steps-head">File for The MLC</h3>
+          <form method="post" action="/s/{session.id}/template" enctype="multipart/form-data">
+            <label for="template">Upload your MLC Bulk Work template (.xlsx)</label>
+            <input type="file" id="template" name="template" accept=".xlsx" required aria-describedby="template-help">
+            <p id="template-help" class="helper">Get it from your MLC Portal: Works Registration, then Bulk
+            Registration Tool, then download the template. Retrack fills a copy and leaves your original alone.</p>
+            <button class="btn btn--quiet" type="submit">Fill in my template</button>
+          </form>{note}{copy_link}</div>"""
+    return ""
+
+
+def _fix_filters(kinds):
+    """Tabs like the results page: All, then one per kind of fix. Hidden until the script runs,
+    so with scripting off every group simply shows, one after another."""
+    buttons = ['<button type="button" class="chip" data-filter="all" aria-pressed="true">All fixes</button>']
+    for kind, songs in kinds:
+        buttons.append(f'<button type="button" class="chip is-{KIND_COLOURS[kind]}" data-filter="{kind}" '
+                       f'aria-pressed="false">{KIND_HEADS[kind]} <span class="num">{len(songs)}</span></button>')
+    return f"""<div class="filters" role="group" aria-label="Show fixes" hidden>
+      {"".join(buttons)}
+      <button type="button" class="chip chip--quiet" data-expand>Open all</button>
+    </div>"""
 
 
 def fixes_page(session, plan, mock=False, template_note="", error=None, seconds_left=SESSION_SECONDS,
                lifetime=SESSION_SECONDS):
+    all_kinds = ((REGISTER, plan.register), (LINK, plan.link), (CLAIM, plan.claim))
+    kinds = [(kind, songs) for kind, songs in all_kinds if songs]
+    ledger = "".join(
+        f'<div class="is-{KIND_COLOURS[kind]}"><dt>{KIND_HEADS[kind]}</dt>'
+        f'<dd><span class="figure">{len(songs)}</span><span class="meaning">{KIND_MEANINGS[kind]}</span></dd></div>'
+        for kind, songs in all_kinds)
     groups = ""
-    for kind, songs in ((REGISTER, plan.register), (LINK, plan.link), (CLAIM, plan.claim)):
-        if not songs:
-            continue
+    for kind, songs in kinds:
         steps = "".join(f"<li>{escape(x)}</li>" for x in STEPS_FOR[kind])
         groups += f"""
-      <section class="fix-group" aria-labelledby="group-{kind}">
+      <section class="group is-{KIND_COLOURS[kind]}" data-status="{kind}" aria-labelledby="group-{kind}">
         <div class="group-head"><h2 id="group-{kind}">{KIND_HEADS[kind]}</h2>
-          <span class="count">{len(songs)} {"song" if len(songs) == 1 else "songs"}</span></div>
-        <p class="lead">{KIND_LEADS[kind]}</p>
-        <h3 class="steps-head">How to do it</h3>
-        <ol class="how-to">{steps}</ol>
+          <span class="count">{_plural(len(songs), "song")}</span></div>
+        <div class="fix-how">
+          <div><p class="group-lead">{KIND_LEADS[kind]}</p>
+            <h3 class="steps-head">How to do it</h3><ol class="how-to">{steps}</ol></div>
+          {_mlc_files(session, kind, template_note)}
+        </div>
         {"".join(_fix_card(r) for r in songs)}
       </section>"""
 
-    submit = ""
-    if plan.link or plan.register:
-        items = ""
-        if plan.link:
-            items += (f'<li><a href="/s/{session.id}/bulk_match.csv" download data-no-warn>{escape(bulk_match_name())}</a>'
-                      "<p>The links in The MLC’s exact Bulk Match format. You’d need it to link many songs at "
-                      "once by email, instead of one by one in the Matching Tool.</p></li>")
-        if plan.register:
-            copy_link = ""
-            if session_template_ready(session):
-                copy_link = (f'<p><a class="btn btn--quiet" href="/s/{session.id}/bulk_work_registration.xlsx" '
-                             'download data-no-warn>Download your filled-in template</a></p>')
-            items += f"""<li><form method="post" action="/s/{session.id}/template" enctype="multipart/form-data">
-              <label for="template">Upload your MLC Bulk Work template (.xlsx)</label>
-              <input type="file" id="template" name="template" accept=".xlsx" required aria-describedby="template-help">
-              <p id="template-help" class="helper">Get it from your MLC Portal: Works Registration, then Bulk
-              Registration Tool, then download the template. You’d need this to register the songs above in bulk;
-              Retrack fills a copy and leaves your original alone.</p>
-              <button class="btn btn--quiet" type="submit">Fill in my template</button>
-            </form>{escape(template_note) if template_note else ""}{copy_link}</li>"""
-        submit = f"""<section class="submit" aria-labelledby="submit-title">
-        <h2 id="submit-title">For submitting to The MLC</h2>
-        <ul class="submit-list">{items}</ul>
-      </section>"""
-
+    # One warning box at the top, with the downloads in it: so it's both "at the top" and
+    # "by the downloads" without saying the same thing twice.
     body = f"""
-  <section class="flow fixes" data-warn-leave aria-labelledby="fixes-title">
+  <section class="flow results fixes" data-warn-leave aria-labelledby="fixes-title">
     <div class="container">
-      <div class="vanish" role="note"><p>{escape(keep_text(lifetime))}</p>{_time_left(session, seconds_left)}</div>
-      <h1 id="fixes-title">Your fixes</h1>
-      <p class="lead">Paid: {escape(price_line(plan.songs))}. Everything Retrack could fill in is below;
-      the highlighted fields are yours to fill in.</p>
+      <div class="results-head">
+        <div>
+          <h1 id="fixes-title">Your fixes</h1>
+          <p class="results-meta">Paid: {escape(price_line(plan.songs))}</p>
+        </div>
+      </div>
+      <p class="lead">Everything Retrack could fill in is below; the highlighted fields are yours to fill in.</p>
       {alert(*error) if error else ""}
-      <section class="downloads" aria-labelledby="downloads-title">
-        <h2 id="downloads-title">Keep a copy</h2>
-        <div class="vanish" role="note"><p>{escape(keep_text(lifetime))}</p>{_time_left(session, seconds_left)}</div>
+      <div class="vanish keep" role="note">
+        <div><p>{escape(keep_text(lifetime))}</p>{_time_left(session, seconds_left)}</div>
         <div class="actions">
           <a class="btn" href="/s/{session.id}/fixes.xlsx" download data-no-warn>Download {escape(fixes_workbook_name())}</a>
-          <button type="button" class="btn btn--quiet" data-print hidden>Print this page</button>
-          <span class="helper">or press Cmd+P (Ctrl+P on Windows) to print.</span>
+          <button type="button" class="btn btn--quiet" data-print hidden>Print</button>
         </div>
-        <p class="compliance-box">{escape(COMPLIANCE_TEXT)}</p>
-      </section>
-      {groups}
-      {submit}
+      </div>
+      <dl class="ledger" aria-label="Fixes by type">{ledger}</dl>
+      {_fix_filters(kinds)}
+      <div class="song-list">{groups}</div>
+      <p class="compliance-box">{escape(COMPLIANCE_TEXT)}</p>
       {privacy_panel(session, mock)}
     </div>
   </section>"""

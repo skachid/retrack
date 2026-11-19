@@ -388,11 +388,34 @@ def test_fix_page_groups_by_type_with_prefilled_and_must_fill(paid):
     _, page = text(srv, f"/s/{sid}/fixes")
     for head in ('id="group-register">Register', 'id="group-link">Link', 'id="group-claim">Claim'):
         assert head in page
-    assert page.count(keep_text()) == 2  # at the top and by the downloads
+    assert page.count(keep_text()) == 1  # once, at the top, in the box with the downloads
     assert "What Retrack filled in" in page and '<div class="must">' in page
     assert "data-warn-leave" in page
     visible = re.sub(r"<[^>]+>", " ", page.split("<main>")[1].split("</main>")[0])
     assert not re.search(r"(^|\s)--[a-z]", visible)  # no command-line flags for web users
+
+
+def test_fix_page_has_tabs_and_short_rows_like_the_results_page(paid):
+    srv, sid = paid
+    _, page = text(srv, f"/s/{sid}/fixes")
+    # Tabs: hidden until the script runs (with JS off every group just shows), one per kind of fix.
+    assert '<div class="filters" role="group" aria-label="Show fixes" hidden>' in page
+    for kind in ("all", "register", "link", "claim"):
+        assert f'data-filter="{kind}"' in page
+        if kind != "all":
+            assert f'data-status="{kind}"' in page  # the group that tab shows
+    assert "data-expand>Open all" in page
+    # Each song is a closed <details> row; opening it shows every field.
+    assert page.count('<details class="song fix-card">') == 4
+    assert "<details class=\"song fix-card\" open" not in page
+    # The keep warning sits with the main download, at the top, before the songs.
+    keep = page.index(keep_text())
+    assert keep < page.index("fixes.xlsx") < page.index('<details class="song fix-card">')
+    # Each tab holds its own file for The MLC.
+    register = page.split('data-status="register"')[1].split("</section>")[0]
+    link = page.split('data-status="link"')[1].split("</section>")[0]
+    assert 'action="/s/' in register and "/template" in register
+    assert "bulk_match.csv" in link
 
 
 def test_bulk_match_csv_is_exactly_the_mlc_format(paid):
@@ -476,7 +499,7 @@ def test_time_left_is_rendered_by_the_server_and_counts_down(tmp_path):
         pay(srv, sid, ids)
         page = text(srv, f"/s/{sid}/fixes")[1]
         assert time_left_text(SESSION_SECONDS) == "About 60 minutes left."
-        assert page.count("About 60 minutes left.") == 2  # in the page itself: works with JS off
+        assert page.count("About 60 minutes left.") == 1  # in the page itself: works with JS off
         assert 'data-time-left-url="/s/' in page  # for the script's live updates
         now[0] += 15 * 60
         assert "About 45 minutes left." in text(srv, f"/s/{sid}/fixes")[1]

@@ -72,7 +72,7 @@
     setTimeout(poll, 1000);
   }
 
-  // ---- Results: filters, open all, print ----
+  // ---- Results and fix page: tabs, open all, print ----
   var results = document.querySelector(".results");
   if (results) {
     results.querySelectorAll("[data-print], .filters").forEach(function (el) { el.hidden = false; });
@@ -113,15 +113,12 @@
     });
   }
 
-  // ---- Fix page: print button, and ask before leaving (the page disappears) ----
+  // ---- Fix page: ask before leaving ----
+  // (Its tabs, Open all and Print are handled by the results code above: same markup.)
   // The browser shows its own "Leave this page?" message; scripts can't change its words.
   // Downloads, printing and the template form don't count as leaving.
   var fixes = document.querySelector("[data-warn-leave]");
   if (fixes) {
-    fixes.querySelectorAll("[data-print]").forEach(function (b) {
-      b.hidden = false;
-      b.addEventListener("click", function () { window.print(); });
-    });
     // Keep "About 47 minutes left." current. The server writes the words; this only asks again.
     fixes.querySelectorAll("[data-time-left-url]").forEach(function (el) {
       var refresh = function () {
