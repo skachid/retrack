@@ -124,16 +124,12 @@ def check_pairs(smart_names=False, ai_search=False):
 
 
 def scan(srv, sid, mapping=SAMPLE_MAPPING, smart_names=False, ai_search=False):
-    """Confirm the columns, then start the free check. The extra checks are chosen on
+    """Confirm the columns, which starts the free check. The extra checks are chosen on
     the pay step, so they're remembered here and sent by pay_all()."""
-    status, headers, body = columns(srv, sid, mapping)
-    if status != 303:
-        return status, headers, body
-    assert headers["Location"].endswith("/check")
     if not hasattr(srv, "checks"):
         srv.checks = {}
     srv.checks[sid] = check_pairs(smart_names, ai_search)
-    return call(srv, f"/s/{sid}/scan", *form([]))
+    return columns(srv, sid, mapping)
 
 
 def wait_done(srv, sid, timeout=10):
@@ -201,19 +197,13 @@ def test_full_flow_upload_columns_scan_report_fix_pack_download(server):
     assert '<option value="3" selected>D: ISRC code</option>' in page
     assert '<option value="4" selected>E: Composer(s)</option>' in page  # writers: a dropdown too
     assert 'id="smart_names"' not in page  # the extra checks live on the pay step
+    assert "The free check looks up each song at The MLC. No AI is used." in page
+    assert "Start the free check" in page
 
-    # 2b. the Check step: just the free check, no extra checks to choose
+    # 3. confirming the columns starts the free check straight away: no separate Check step
     status, headers, _ = columns(server, sid, [("map_title", "1"), ("map_artist", "2"), ("map_isrc", "3"),
                                                ("map_writers", "4")])
-    assert status == 303 and headers["Location"].endswith("/check")
-    _, page = text(server, f"/s/{sid}/check")
-    assert "The free check looks up each song at The MLC. No AI is used." in page
-    assert 'id="smart_names"' not in page and 'id="ai_search"' not in page
-
-    # 3. the free check
-    status, headers, _ = scan(server, sid, [("map_title", "1"), ("map_artist", "2"), ("map_isrc", "3"),
-                                            ("map_writers", "4")])
-    assert status == 303
+    assert status == 303 and headers["Location"].endswith("/progress")
     assert wait_done(server, sid)["state"] == "done"
 
     # 4. the report, with import notes and the songs to tick
@@ -422,7 +412,11 @@ def test_mlc_problems_are_explained(tmp_path, client, expected):
         status, page = text(srv, f"/s/{sid}/progress")
         assert status == 502 and expected in page
         assert "Your file is fine" in page or "Nothing is wrong with your file" in page
-        assert "Back to the checks" in page
+        assert "Try the check again" in page and f'action="/s/{sid}/scan"' in page
+        # ...and trying again really runs the check again (here The MLC still fails)
+        status, headers, _ = call(srv, f"/s/{sid}/scan", *form([]))
+        assert status == 303 and headers["Location"].endswith("/progress")
+        assert wait_done(srv, sid)["state"] == "failed"
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
@@ -626,7 +620,6 @@ def test_sample_data_banner_on_every_page_in_mock_mode(server):
     pages_seen = [
         text(server, "/")[1],
         text(server, f"/s/{sid}/columns")[1],
-        text(server, f"/s/{sid}/check")[1],
         results,
         text(server, f"/s/{sid}/fix", data=form([("song", i) for i in ids])[0],
              content_type="application/x-www-form-urlencoded")[1],
@@ -736,12 +729,22 @@ def test_privacy_text_matches_what_a_scan_actually_sends(tmp_path, smart_names, 
         assert "after checkout" in claude_line
 
 
-def test_check_page_says_no_ai_and_offers_no_extra_checks(server):
+def test_there_is_no_check_step_any_more(server):
+    import re
+    assert "Four steps" in text(server, "/")[1]
     sid = upload_ok(server)
+    _, page = text(server, f"/s/{sid}/columns")
+    steps = re.search(r'<ol class="steps"[^>]*>(.*?)</ol>', page, re.S)
+    labels = re.findall(r"<li[^>]*>(.*?)</li>", steps.group(1)) if steps else []
+    assert labels == ["Upload", "Columns", "Report", "Fix pack"], labels
+    assert "Step 2 of 4: Columns" in page
+    # An old /check link (or the Back button) lands where the session is now.
+    status, headers, _ = call(server, f"/s/{sid}/check")
+    assert status == 303 and headers["Location"].endswith("/columns")
     columns(server, sid)
-    _, page = text(server, f"/s/{sid}/check")
-    assert "The free check looks up each song at The MLC. No AI is used." in page
-    assert '<input type="checkbox"' not in page and "Start the check" in page
+    wait_done(server, sid)
+    status, headers, _ = call(server, f"/s/{sid}/check")
+    assert status == 303 and headers["Location"].endswith("/progress")
 
 
 def test_pay_step_shows_the_privacy_text_for_each_toggle_setting(server):
@@ -791,7 +794,7 @@ def test_without_mlc_login_it_explains_and_exits(monkeypatch, capsys):
 
 def test_pages_say_ai_not_claude(server):
     sid = scanned(server)
-    for path in ("/", f"/s/{sid}/columns", f"/s/{sid}/check", f"/s/{sid}/results"):
+    for path in ("/", f"/s/{sid}/columns", f"/s/{sid}/results"):
         assert "Claude" not in text(server, path)[1], path
 
 

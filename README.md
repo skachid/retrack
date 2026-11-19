@@ -9,7 +9,7 @@ Small indie labels, artist managers, producers and publishers who have a catalog
 ## How it works
 
 1. **Upload** your spreadsheet as it is: a `.csv` or `.xlsx` from DistroKid, TuneCore or your own sheet. Retrack shows which column it read as the title, artist, ISRC and writers, and you correct it if needed.
-2. **Free check.** Every song is looked up at The MLC by its ISRC and comes back as:
+2. **Free check.** Every song is looked up at The MLC by its ISRC (no AI is used) and comes back as:
 
    | | Meaning |
    |---|---|
@@ -17,7 +17,7 @@ Small indie labels, artist managers, producers and publishers who have a catalog
    | 🟡 Yellow | The song is there, but shares don't add up to 100%, nobody's collecting, or writers are missing. |
    | 🟢 Green | Registered, fully claimed, writers match. |
 
-3. **Pay for fixes.** Tick the songs you want fixed. It's one flat price per song, whatever the colour. You confirm that you reviewed the data and control the shares, then pay once on Stripe's checkout page.
+3. **Pay for fixes.** Tick the songs you want fixed. It's one flat price per song, whatever the colour. You can turn on two optional extra checks that run after checkout, on the paid songs only. You confirm that you reviewed the data and control the shares, then pay once on Stripe's checkout page.
 4. **Fix page.** Each paid song is grouped by what to do (Register, Link or Claim), with what Retrack filled in, the fields you must fill in yourself, short steps, and a spreadsheet to download. Where it applies, you also get the file in The MLC's own format. Retrack never submits anything for you.
 
 ## Privacy and your data

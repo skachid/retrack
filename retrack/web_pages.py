@@ -31,8 +31,7 @@ from .report import CSS_PATH, GROUPS, MANUAL_CHECKS, date_text, findings_html, g
 
 HERE = Path(__file__).parent
 
-STEPS = [("upload", "Upload"), ("columns", "Columns"), ("check", "Check"), ("report", "Report"),
-         ("fix", "Fix pack")]
+STEPS = [("upload", "Upload"), ("columns", "Columns"), ("report", "Report"), ("fix", "Fix pack")]
 FIELD_LABELS = {"title": "Song title", "artist": "Artist", "isrc": "ISRC", "writers": "Writers"}
 KIND_TEXT = {
     REGISTER: "Register it: rows for The MLC’s Bulk Work Registration template",
@@ -183,12 +182,12 @@ def home_page(mock=False, error=None, notice=""):
   <section id="how" class="section" aria-labelledby="how-title">
     <div class="container">
       <h2 id="how-title">How it works</h2>
-      <p class="lead">Five steps, about five minutes.</p>
+      <p class="lead">Four steps, about five minutes.</p>
       <ol class="how-steps">
         <li><h3>Upload</h3><p>Your spreadsheet as it is: a distributor export or your own sheet.</p></li>
-        <li><h3>Check the columns</h3><p>Retrack shows which column it read as the title, ISRC and writers.</p></li>
+        <li><h3>Check the columns</h3><p>Confirm which column is the title, ISRC and writers, then start the free check. No AI is used.</p></li>
         <li><h3>Read the report</h3><p>Red songs come first, each with what’s wrong and how to fix it.</p></li>
-        <li><h3>Get the fix pack</h3><p>Tick the songs to fix and download the files to upload yourself.</p></li>
+        <li><h3>Get the fix pack</h3><p>Tick the songs to fix, choose any extra checks, pay, and download the files to upload yourself.</p></li>
       </ol>
       <div class="file-spec">
         <div>
@@ -285,7 +284,8 @@ def columns_page(session, mock=False, error=None):
           </div>
         </section>
 
-        <div class="actions"><button class="btn" type="submit">Next: choose the checks</button>
+        <p class="helper check-line">{escape(CHECK_LINE)}</p>
+        <div class="actions"><button class="btn" type="submit">Start the free check</button>
           <a href="/">Upload a different file</a></div>
       </form>
     </div>
@@ -293,7 +293,7 @@ def columns_page(session, mock=False, error=None):
     return layout("Check the columns, Retrack", body, mock, step="columns")
 
 
-# ---- 3. Check: choose the extra checks, then run ---------------------------------------------
+# ---- The extra checks (chosen on the pay step), and the check running ------------------------
 
 def _switch(field_id, name, label, sentence, checked, mock, required=False):
     note = MOCK_TOGGLE_TEXT if mock else ""
@@ -303,23 +303,6 @@ def _switch(field_id, name, label, sentence, checked, mock, required=False):
 
 
 CHECK_LINE = "The free check looks up each song at The MLC. No AI is used."
-
-
-def check_page(session, mock=False, error=None):
-    body = f"""
-  <section class="flow" aria-labelledby="check-title">
-    <div class="container">
-      <h1 id="check-title">Check your songs</h1>
-      <p class="lead">{escape(CHECK_LINE)}</p>
-      {_import_notes(session)}
-      {alert(*error) if error else ""}
-      <form id="scan-form" class="scan-form" method="post" action="/s/{session.id}/scan">
-        <div class="actions"><button class="btn" type="submit">Start the check</button>
-          <a href="/s/{session.id}/columns">Back to the columns</a></div>
-      </form>
-    </div>
-  </section>"""
-    return layout("Check your songs, Retrack", body, mock, step="check")
 
 
 def extra_checks(session, mock):
@@ -367,7 +350,7 @@ def progress_page(session, mock=False):
     refresh = f'<meta http-equiv="refresh" content="2;url=/s/{session.id}/progress">'
     if session.phase == "finish":
         return layout("Working out your fixes, Retrack", body, mock, step="fix", head_extra=refresh)
-    return layout("Checking your catalog, Retrack", body, mock, step="check", head_extra=refresh)
+    return layout("Checking your catalog, Retrack", body, mock, step="report", head_extra=refresh)
 
 
 SCAN_LEAD = "Retrack is asking The MLC about each song, one at a time. This page updates by itself; keep this window open."
@@ -877,8 +860,8 @@ def privacy_page(mock=False, payment_mode=DEMO):
       <h1 id="privacy-page-title">Privacy</h1>
       <p class="lead">What happens to your catalog, and what leaves this computer.</p>
       <ul class="privacy-list single">{lst}</ul>
-      <p class="helper">Smart names and AI search are off unless you turn them on; the Check step shows
-      exactly what each one sends before you start. Uploads are deleted after 60 minutes, when you press
+      <p class="helper">Smart names and AI search are off unless you turn them on; the pay step shows
+      exactly what each one sends before you pay. Uploads are deleted after 60 minutes, when you press
       Delete my files now, or when Retrack stops.</p>
       <div class="actions"><a class="btn" href="/">Back to Retrack</a></div>
     </div>

@@ -91,6 +91,8 @@ strong, b { font-weight: 600; }
 .flow h2, .flow .h2 { font-size: var(--text-xl); font-family: var(--font-display); font-weight: 400; }
 .container.narrow { max-width: var(--container-narrow); }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-lg); margin-top: var(--space-xl); }
+.check-line { margin-top: var(--space-xl); }
+.check-line + .actions { margin-top: var(--space-md); }
 
 fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
 legend { padding: 0; }

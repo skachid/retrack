@@ -7,9 +7,9 @@ The flow, one page per step (pages are built in web_pages.py):
   GET  /                        upload a spreadsheet (.csv or .xlsx, any columns)
   POST /upload                  saves it in a private session folder, reads it
   GET  /s/<id>/columns          confirm the column mapping
-  POST /s/<id>/columns          converts the rows with that mapping
-  GET  /s/<id>/check            choose the extra checks (smart names, AI search: after checkout)
-  POST /s/<id>/scan             starts the free check in the background (it never calls the AI)
+  POST /s/<id>/columns          converts the rows with that mapping and starts the free check in
+                                the background (it never calls the AI)
+  POST /s/<id>/scan             runs the free check again (the "Try again" after an MLC error)
   POST /s/<id>/recheck          after checkout: AI search for paid red songs it was off for
   GET  /s/<id>/progress         "Checking 37 of 120…" (refreshes itself)
   GET  /s/<id>/status           the same, as JSON, for the page's script
@@ -176,7 +176,7 @@ MLC_LOGIN_FAILED = ("Retrack couldn’t log in to The MLC",
                     ".env file, then stop Retrack (Ctrl+C) and start it again. Your file is fine.")
 MLC_DOWN = ("The MLC didn’t answer",
             "Nothing is wrong with your file. The MLC’s service may be busy or down. "
-            "Wait a few minutes, then press Start the check again.")
+            "Wait a few minutes, then press Try the check again.")
 AI_MISSING = ("The AI checks aren’t set up on this computer",
               "Smart names and AI search need an API key for the AI service (ANTHROPIC_API_KEY, see "
               "docs/SETUP.md). Turn both checks off to go on without them, or set the key and restart Retrack.")
@@ -221,7 +221,7 @@ def run_scan(session, make_client, name_matcher, work_searcher, on_done=None):
             session.fail(*MLC_DOWN)
         else:  # a bug: say so plainly instead of hanging on "Checking…"
             session.fail("Something went wrong inside Retrack",
-                         f"Your file is fine. Press Start the check to try again; if it happens again, "
+                         f"Your file is fine. Press Try the check again; if it happens again, "
                          f"restart Retrack. ({type(e).__name__})")
     finally:
         if session.phase == "finish":
@@ -445,10 +445,16 @@ def make_handler(config):
                     "That’s a lot of songs at once",
                     f"Your file has {len(rows)} songs; Retrack checks up to {MAX_SONGS} at a time. "
                     "Split the spreadsheet into parts and upload each one.")))
-            session.rows, session.results, session.state = rows, [], "ready"
-            self._redirect(f"/s/{session.id}/check")
+            session.rows, session.state = rows, "ready"
+            self._start_free_check(session)
 
-        # -- 3. check --
+        # -- the free check, and the extra checks after checkout --
+        def _start_free_check(self, session):
+            # The free check never calls the AI: no name matcher, no work searcher.
+            # The extra checks are chosen on the pay step and run only after checkout.
+            session.results = [None] * len(session.rows)
+            self._start(session, list(range(len(session.rows))))
+
         def _ai_tools(self, session, smart_names, ai_search):
             """The AI checks to run after checkout, as (name matcher, work searcher), or
             None if the AI service isn't set up. Every call goes through a MeteredClient:
@@ -506,21 +512,17 @@ def make_handler(config):
             return False
 
         def get_check(self, session):
-            if session.state == "columns":
-                return self._redirect(f"/s/{session.id}/columns")
-            if session.state == "running":
-                return self._redirect(f"/s/{session.id}/progress")
-            self._send(200, pages.check_page(session, mock))
+            # There's no Check step any more (the Columns step starts the check). An old
+            # link or the Back button lands wherever this session is now.
+            self._redirect(f"/s/{session.id}/{'columns' if session.state in ('columns', 'ready') else 'progress'}")
 
         def post_scan(self, session):
+            """Run the free check again: the "Try again" after The MLC failed."""
             if session.state == "running":
                 return self._redirect(f"/s/{session.id}/progress")
             if session.state == "columns":
                 return self._redirect(f"/s/{session.id}/columns")
-            # The extra checks are chosen on the pay step; the free check never calls the AI.
-            session.results = [None] * len(session.rows)
-            # The free check never calls the AI: no name matcher, no work searcher.
-            self._start(session, list(range(len(session.rows))))
+            self._start_free_check(session)
 
         def post_recheck(self, session):
             """After checkout: AI search for the paid red songs that couldn't be placed
@@ -546,17 +548,19 @@ def make_handler(config):
                 return self._redirect(f"/s/{session.id}/{'fixes' if session.phase == 'finish' else 'results'}")
             if session.state == "failed":
                 title, message = session.error
-                retry = (f'<a class="btn" href="/s/{session.id}/check">Back to the checks</a>'
+                retry = (f'<form method="post" action="/s/{session.id}/scan">'
+                         '<button class="btn" type="submit">Try the check again</button></form>'
+                         f'<a href="/s/{session.id}/columns">Back to the columns</a>'
                          '<a href="/">Upload a different file</a>')
-                return self._send(502, pages.error_page(title, message, mock, step="check", action=retry))
+                return self._send(502, pages.error_page(title, message, mock, step="report", action=retry))
             if session.state in ("columns", "ready"):
-                return self._redirect(f"/s/{session.id}/{'columns' if session.state == 'columns' else 'check'}")
+                return self._redirect(f"/s/{session.id}/columns")
             self._send(200, pages.progress_page(session, mock))
 
         def get_status(self, session):
             done_page = "fixes" if session.phase == "finish" else "results"
             nxt = {"done": done_page, "failed": "progress", "columns": "columns",
-                   "ready": "check"}.get(session.state, "progress")
+                   "ready": "columns"}.get(session.state, "progress")
             self._send(200, json.dumps({"state": session.state, "done": session.done, "total": session.total,
                                         "text": pages.progress_text(session), "next": f"/s/{session.id}/{nxt}"}),
                        "application/json")
