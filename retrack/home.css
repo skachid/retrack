@@ -226,6 +226,9 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
 .fix-skip { padding-block: var(--space-md); color: var(--color-ink-2); }
 .fix-total { margin-block: var(--space-lg); font-size: var(--text-lg); font-variant-numeric: tabular-nums; }
 .fix-all { margin-top: var(--space-xl); }
+.price-part { display: block; }
+.price-part:last-child:not(:first-child) { font-weight: 600; }
+.paid-price .price-part:first-child { font-weight: 400; }
 .fix-all-box { display: inline-flex; gap: var(--space-md); align-items: center; cursor: pointer; font-weight: 600; }
 .fix-all + .fix-list { margin-top: var(--space-md); }
 .addon-why { display: block; margin-top: var(--space-2xs); color: var(--color-muted); }

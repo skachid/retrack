@@ -26,7 +26,7 @@ from retrack import web
 from retrack import web_pages as pages
 from retrack.checker import load_catalog
 from retrack.compliance import ATTESTATION_TEXT, COMPLIANCE_TEXT
-from retrack.fixes import price_line
+from retrack.fixes import price_line, price_parts
 from retrack.mlc_client import MLCAuthError, MLCError, MockClient
 from retrack.name_matcher import ClaudeNameMatcher, MockNameMatcher
 from retrack.privacy import ISRCS, SONG_CODES, TITLES, WRITER_NAMES, data_flows, privacy_items, privacy_text
@@ -297,9 +297,10 @@ def test_price_on_the_page_comes_from_price_line(server):
         for ai in (False, True):
             for sn in (False, True):
                 addons = [a for a, on in (("ai_search", ai), ("smart_names", sn)) if on]
-                expected[f"{n}|{int(ai)}{int(sn)}"] = price_line(fixable[:n], addons)
+                expected[f"{n}|{int(ai)}{int(sn)}"] = price_parts(fixable[:n], addons)
     assert lines == expected  # every song count with every add-on combination
-    assert lines["4|11"] == "4 songs × $5.00 = $20.00 · AI search $2.00 · Smart names $2.00 · Total $24.00"
+    assert lines["4|11"] == ["4 songs × $5.00 = $20.00", "AI search $2.00", "Smart names $2.00", "Total $24.00"]
+    assert "·" not in page.split('<section class="fix"')[1]  # one part per line, never joined by dots
 
 
 # ---- Progress ---------------------------------------------------------------------------------

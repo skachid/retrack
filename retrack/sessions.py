@@ -38,8 +38,11 @@ class Session:
     table: object = None   # importer.Table
     mapping: dict = None   # importer column mapping (proposed, then confirmed)
     proposed: dict = None  # what the rules proposed, to keep their confidence
-    # The add-ons paid for this visit: they're what runs after checkout (web.mark_paid sets them)
+    # Add-ons are bought per order and cover that order's songs only (web.mark_paid sets these).
+    # settings says whether any song has the add-on (for the privacy copy); addon_songs says which.
     settings: dict = field(default_factory=lambda: {"smart_names": False, "ai_search": False})
+    addon_songs: dict = field(default_factory=lambda: {"smart_names": set(), "ai_search": set()})
+    addon_purchases: list = field(default_factory=list)  # one entry per add-on bought, for the paid price
     import_result: object = None  # importer.ImportResult
     rows: list = field(default_factory=list)     # CatalogRows, in catalog order
     results: list = field(default_factory=list)  # checker Results, one per row
@@ -52,7 +55,7 @@ class Session:
     created_at: float = field(default_factory=time.monotonic)
     # Payment (see payments.py): what's been paid for, and the open order if any
     attestation: object = None   # fixes.Attestation, recorded when the user ticks the box
-    order: dict = None           # {"songs": [...], "addons": [...], "checkout_id", "url", "amount" (cents)}
+    order: dict = None           # {"songs", "addons", "covers" (songs the add-ons cover), "checkout_id", "url", "amount" (cents)}
     paid_songs: list = field(default_factory=list)  # result indexes the user has paid for
     orders_placed: int = 0
     template_note: str = ""  # e.g. songs left out of a filled-in MLC template, and why
@@ -61,6 +64,10 @@ class Session:
     finished: set = field(default_factory=set)  # paid songs whose after-checkout checks are done
     ai_budget: OrderBudget = field(default_factory=OrderBudget)  # AI calls this session may still make
     finish_problem: str = ""  # why some paid songs couldn't be worked out, for the fix page
+
+    def has_addon(self, addon, i):
+        """Did an order that included song i (or bought this add-on for it) pay for this add-on?"""
+        return i in self.addon_songs[addon]
 
     @property
     def total(self):

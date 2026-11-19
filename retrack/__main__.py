@@ -130,6 +130,7 @@ def make_fix_pack(results, args, input_fn, stdin_is_tty):
         print("  Nothing to fix.")
         return 0
     print(f"\n  {price_line(plan.songs)}")
+    print("  The same price for every verdict.")
     if plan.register and not args.template:
         print(f"\n  No --template given, so registrations go in a CSV worksheet instead. {TEMPLATE_HELP}")
 

@@ -59,7 +59,7 @@ from . import web_pages as pages
 from .ai import (DAILY_LIMIT_ENV, AIConfigError, DailySpend, MeteredClient, daily_limit_from_env)
 from .checker import RED, check_row, load_catalog, needs_ai_after_checkout
 from .env import load_env
-from .fixes import (ADDON_PRICE_USD, ADDONS, AI_SEARCH, FIX_PRICE_USD, UNRESOLVED, FixPackError, addon_applies,
+from .fixes import (ADDON_PRICE_USD, ADDONS, AI_SEARCH, FIX_PRICE_USD, SMART_NAMES, UNRESOLVED, FixPackError, addon_applies,
                     addons_offered, bulk_match_name, confirm, fixes_workbook_name, open_template, order_total,
                     plan_fixes, sold_kind, split_for_template, write_bulk_match, write_fixes_workbook,
                     write_template_copy)
@@ -214,8 +214,12 @@ def run_scan(session, make_client, name_matcher, work_searcher, on_done=None):
             if session.cancelled:  # "Delete my files now" was pressed
                 return
             before = session.results[i]
-            searcher = work_searcher if before is not None and before.status == RED else None
-            session.results[i] = check_row(session.rows[i], client, name_matcher, searcher)
+            # Each add-on runs only on the songs an order paid for it (add-ons are per order).
+            # In the free scan both are None anyway.
+            matcher = name_matcher if session.has_addon(SMART_NAMES, i) else None
+            searcher = (work_searcher if before is not None and before.status == RED
+                        and session.has_addon(AI_SEARCH, i) else None)
+            session.results[i] = check_row(session.rows[i], client, matcher, searcher)
             session.done += 1
         session.state = "done"
     except Exception as e:
@@ -254,34 +258,34 @@ def order_is_paid(session, checkout):
             and checkout.amount_total == order["amount"])
 
 
-def mark_paid(session, songs, addons=()):
-    """Unlock these songs and add-ons. Doing it twice changes nothing (idempotent).
+def mark_paid(session, songs, addons=(), covers=None):
+    """Unlock these songs and add-ons. Callers only call it once per paid order.
 
     Each newly paid song also adds MAX_SEARCHES AI calls to what this session may
-    use after checkout: the per-order AI limit (see ai.py). A paid add-on is switched
-    on in session.settings, which is what runs after checkout. An add-on bought later
-    (on the fix page) sends the paid songs it applies to back to be worked out.
+    use after checkout: the per-order AI limit (see ai.py).
+
+    Add-ons are per order: each one covers that order's songs only (`covers`, which is
+    the order's songs, or for an add-on bought on its own on the fix page, the paid
+    songs it was bought for). Covered songs that were already worked out go back to
+    be worked out again with the add-on.
     """
+    covers = list(songs if covers is None else covers)
     new = set(songs) - set(session.paid_songs)
     session.ai_budget.add_songs(len(new), MAX_SEARCHES)
     session.paid_songs = sorted(set(session.paid_songs) | set(songs))
-    new_addons = [a for a in addons if not session.settings.get(a)]
-    session.settings = dict(session.settings, **{a: True for a in addons})
-    if new_addons:
-        session.finished -= {i for i in session.paid_songs
-                             if any(addon_applies(a, session.results[i]) for a in new_addons)}
+    for a in addons:
+        newly = set(covers) - session.addon_songs[a]
+        session.addon_songs[a] |= set(covers)
+        session.finished -= {i for i in newly if addon_applies(a, session.results[i])}
+        session.settings = dict(session.settings, **{a: True})
+    session.addon_purchases += list(addons)
     session.order = None
-
-
-def paid_addons(session):
-    """The add-ons paid for this visit, in the order they're listed."""
-    return [a for a in ADDONS if session.settings.get(a)]
 
 
 def unlock_order(session):
     """Stripe confirmed the open order: unlock what it was for."""
     order = session.order
-    mark_paid(session, order["songs"], order.get("addons", []))
+    mark_paid(session, order["songs"], order.get("addons", []), order.get("covers"))
 
 
 # ---- The server ------------------------------------------------------------------------------
@@ -526,11 +530,13 @@ def make_handler(config):
             pending = [i for i in session.paid_songs if i not in session.finished]
             if not pending:
                 return False
-            s = session.settings
-            todo = [i for i in pending if needs_ai_after_checkout(session.results[i], s["smart_names"],
-                                                                  s["ai_search"])]
+            # Per song: only the add-ons an order paid for that song.
+            todo = [i for i in pending if needs_ai_after_checkout(session.results[i],
+                                                                  session.has_addon(SMART_NAMES, i),
+                                                                  session.has_addon(AI_SEARCH, i))]
             if todo:
-                tools = self._ai_tools(session, s["smart_names"], s["ai_search"])
+                tools = self._ai_tools(session, any(session.has_addon(SMART_NAMES, i) for i in todo),
+                                       any(session.has_addon(AI_SEARCH, i) for i in todo))
                 if tools is not None:
                     self._start(session, todo, *tools, phase="finish")
                     return True
@@ -570,10 +576,11 @@ def make_handler(config):
                 return self._send_fixes(session, 400, recheck_error=NO_AI_CONSENT)
             if not mock and self._ai_tools(session, smart_names=False, ai_search=True) is None:
                 return self._send_fixes(session, 503, recheck_error=AI_MISSING)  # before any charge
-            if session.settings["ai_search"]:  # already paid for: never charged twice
+            uncovered = [i for i in todo if not session.has_addon(AI_SEARCH, i)]
+            if not uncovered:  # their order already paid for AI search: run it again, never charge twice
                 tools = self._ai_tools(session, smart_names=False, ai_search=True)
                 return self._start(session, todo, *tools, phase="finish")
-            error = self._checkout(session, [], [AI_SEARCH], cancel_path="fixes")
+            error = self._checkout(session, [], [AI_SEARCH], cancel_path="fixes", covers=uncovered)
             if error:
                 self._send_fixes(session, 502, recheck_error=error)
 
@@ -651,11 +658,11 @@ def make_handler(config):
             """The songs and add-ons a form asks for, checked against the rules.
 
             Returns (songs, addons, error). Songs already paid for are dropped (never charged
-            again), and so are add-ons already paid for this visit. An add-on none of the
-            songs needs (it was shown disabled) can't be bought: that's an error.
+            again). Add-ons are per order: each covers this order's songs. An add-on none of
+            the songs needs (it was shown disabled) can't be bought: that's an error.
             """
             songs = [i for i in self._chosen(session, form.get("song", [])) if i not in session.paid_songs]
-            asked = [a for a in ADDONS if a in form and not session.settings.get(a)]
+            asked = [a for a in ADDONS if a in form]  # per order: a new order pays for its own
             offered = addons_offered([session.results[i] for i in songs])
             for a in asked:
                 if a not in offered:
@@ -725,7 +732,7 @@ def make_handler(config):
                 self._send(502, pages.pay_page(session, plan, chosen, mock, config.payments.mode,
                                                addons=addons, error=error))
 
-        def _checkout(self, session, songs, addons, cancel_path):
+        def _checkout(self, session, songs, addons, cancel_path, covers=None):
             """Pay for these songs and add-ons: one order, one Checkout Session.
 
             Demo mode unlocks straight away. Otherwise: reuse the open checkout for the same
@@ -733,8 +740,9 @@ def make_handler(config):
             a line for the songs and a line per add-on. Redirects, and returns None; if Stripe
             fails, returns the (title, message) to show instead.
             """
+            covers = list(songs if covers is None else covers)
             if config.payments.mode == DEMO:
-                mark_paid(session, songs, addons)
+                mark_paid(session, songs, addons, covers)
                 return self._redirect(f"/s/{session.id}/fixes")
             songs_list = [session.results[i] for i in songs]
             amount = round(order_total(songs_list, addons) * 100)  # in cents, for checking Stripe's total
@@ -745,7 +753,8 @@ def make_handler(config):
                     if order_is_paid(session, checkout):  # already paid in another tab
                         unlock_order(session)
                         return self._redirect(f"/s/{session.id}/fixes")
-                    same = order["songs"] == songs and order.get("addons", []) == addons
+                    same = (order["songs"] == songs and order.get("addons", []) == addons
+                            and order.get("covers", order["songs"]) == covers)
                     if same and checkout.status == "open":
                         return self._redirect(checkout.url)  # the same order: reuse it, never a second charge
                     if checkout.status == "open":
@@ -765,8 +774,8 @@ def make_handler(config):
                 # Stripe said no to the request itself: retrying gets the same answer
                 return ("Stripe rejected the payment setup", "Stripe rejected the payment setup. "
                         "Nothing was charged. The details are in the terminal where Retrack is running.")
-            session.order = {"songs": songs, "addons": addons, "checkout_id": checkout.id, "url": checkout.url,
-                             "amount": amount}
+            session.order = {"songs": songs, "addons": addons, "covers": covers, "checkout_id": checkout.id,
+                             "url": checkout.url, "amount": amount}
             self._redirect(checkout.url)
             return None
 
@@ -863,7 +872,7 @@ def make_handler(config):
             if self._need_paid(session):
                 return
             path = session.folder / fixes_workbook_name()
-            write_fixes_workbook(self._paid_plan(session), session.attestation, path, paid_addons(session))
+            write_fixes_workbook(self._paid_plan(session), session.attestation, path, session.addon_purchases)
             self._send(200, path.read_bytes(), XLSX_TYPE,
                        [("Content-Disposition", f'attachment; filename="{path.name}"')])
 

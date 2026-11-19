@@ -193,25 +193,34 @@ def addons_offered(songs):
 
 
 def order_total(songs, addons=()):
-    """Songs at the flat per-song price, plus each add-on once, at its flat price."""
-    return total_price(songs) + ADDON_PRICE_USD * len(set(addons))
+    """Songs at the flat per-song price, plus each add-on bought at its flat price.
+
+    `addons` lists add-on purchases: one entry per order that bought it (an order never
+    lists the same add-on twice, so within one order each is charged once)."""
+    return total_price(songs) + ADDON_PRICE_USD * len(addons)
 
 
-def price_line(songs, addons=None):
-    """The price, spelled out.
-
-    The command line (addons=None): "4 songs × $5.00 = $20.00 (same price for every verdict)".
-    The web UI (addons is a list, maybe empty):
-    "4 songs × $5.00 = $20.00 · AI search $2.00 · Smart names $2.00 · Total $24.00".
-    """
+def price_parts(songs, addons=()):
+    """The price, as its parts, one per line on a page:
+    ["4 songs × $5.00 = $20.00", "AI search $2.00", "Smart names $2.00", "Total $24.00"].
+    With no add-ons it's just the songs part, which is already the total."""
     n = len(songs)
-    songs_part = f"{n} {'song' if n == 1 else 'songs'} × ${FIX_PRICE_USD:,.2f} = ${total_price(songs):,.2f}"
-    if addons is None:
-        return songs_part + " (same price for every verdict)"
-    parts = [songs_part] if n else []
-    parts += [f"{ADDON_LABELS[a]} ${ADDON_PRICE_USD:,.2f}" for a in ADDONS if a in addons]
-    parts.append(f"Total ${order_total(songs, addons):,.2f}")
-    return " · ".join(parts)
+    parts = [f"{n} {'song' if n == 1 else 'songs'} × ${FIX_PRICE_USD:,.2f} = ${total_price(songs):,.2f}"]
+    for a in ADDONS:
+        k = list(addons).count(a)
+        if k == 1:
+            parts.append(f"{ADDON_LABELS[a]} ${ADDON_PRICE_USD:,.2f}")
+        elif k > 1:  # bought with more than one order this visit (fix page: what was paid)
+            parts.append(f"{ADDON_LABELS[a]}, {k} orders × ${ADDON_PRICE_USD:,.2f} = ${k * ADDON_PRICE_USD:,.2f}")
+    if addons:
+        parts.append(f"Total ${order_total(songs, addons):,.2f}")
+    return parts
+
+
+def price_line(songs, addons=()):
+    """The same, as one line of text, for the command line and the files:
+    "4 songs × $5.00 = $20.00, AI search $2.00, Smart names $2.00, Total $24.00"."""
+    return ", ".join(price_parts(songs, addons))
 
 
 # ---- Attestation -----------------------------------------------------------------
@@ -507,7 +516,7 @@ def claim_row(r):
             "Your writers missing there": ", ".join(r.missing_writers), "What to do": " ".join(r.fixes)}
 
 
-def write_fixes_workbook(plan, attestation, out_path, addons=None):
+def write_fixes_workbook(plan, attestation, out_path, addons=()):
     """Everything for the paid songs in one .xlsx: Summary, Register, Link, Claim, Confirmation.
 
     Every data tab has its headers on row 1, with nothing above them. Ownership

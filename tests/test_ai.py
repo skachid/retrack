@@ -200,7 +200,9 @@ def test_after_checkout_the_ai_runs_only_on_the_paid_songs(real):
     for unpaid in ("Ghost Signal", "Paper Crowns", "Concrete Garden", "Nova Reyes", "Marcus Bell", "Sam Lee"):
         assert unpaid not in sent, unpaid  # never a song that wasn't paid for
     # the song price doesn't change; the add-on is a flat $2 for the order
-    assert "Paid: 1 song × $5.00 = $5.00 · AI search $2.00 · Total $7.00" in page
+    paid = page.split('class="results-meta paid-price"')[1].split("</p>")[0]
+    assert '1 song × $5.00 = $5.00</span><span class="price-part">AI search $2.00</span>' in paid
+    assert "Total $7.00" in paid
 
 
 def test_the_progress_page_says_it_is_working_out_the_fixes():

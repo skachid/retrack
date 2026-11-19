@@ -797,7 +797,7 @@ def test_mock_mlc_still_refuses_a_live_key(monkeypatch, capsys):
 
 from retrack import web_pages as pages  # noqa: E402
 from retrack.fixes import (ADDON_PRICE_USD, AI_SEARCH, SMART_NAMES, addons_offered,  # noqa: E402
-                           order_total, price_line, sold_kind)
+                           order_total, price_line, price_parts, sold_kind)
 
 ADDON_CENTS = round(ADDON_PRICE_USD * 100)
 SONG_CENTS = round(FIX_PRICE_USD * 100)
@@ -818,22 +818,33 @@ def test_add_on_prices_are_constants_and_flat_per_order():
     assert FIX_PRICE_USD == 5.00 and ADDON_PRICE_USD == 2
     songs = [object()] * 7
     assert order_total(songs, [AI_SEARCH]) == 7 * FIX_PRICE_USD + 2  # not per song
-    assert order_total(songs, [AI_SEARCH, AI_SEARCH]) == 7 * FIX_PRICE_USD + 2  # never twice
+    # one entry per order that bought it: two orders with AI search pay for it twice, once each
+    assert order_total(songs, [AI_SEARCH, AI_SEARCH]) == 7 * FIX_PRICE_USD + 4
 
 
 @pytest.mark.parametrize("n", [1, 4])
 @pytest.mark.parametrize("addons", [[], [AI_SEARCH], [SMART_NAMES], [AI_SEARCH, SMART_NAMES]])
 def test_the_price_line_and_total_for_every_combination(n, addons):
     songs = [object()] * n
-    line = price_line(songs, addons)
+    parts = price_parts(songs, addons)
     total = n * FIX_PRICE_USD + 2 * len(addons)
-    assert line.startswith(f"{n} {'song' if n == 1 else 'songs'} × $5.00 = ${n * 5:.2f}")
-    assert ("AI search $2.00" in line) == (AI_SEARCH in addons)
-    assert ("Smart names $2.00" in line) == (SMART_NAMES in addons)
-    assert line.endswith(f"Total ${total:.2f}") and order_total(songs, addons) == total
-    assert price_line([object()] * 4, [AI_SEARCH, SMART_NAMES]) == \
-        "4 songs × $5.00 = $20.00 · AI search $2.00 · Smart names $2.00 · Total $24.00"
-    assert price_line(songs).endswith("(same price for every verdict)")  # the command line keeps its line
+    assert parts[0] == f"{n} {'song' if n == 1 else 'songs'} × $5.00 = ${n * 5:.2f}"
+    assert ("AI search $2.00" in parts) == (AI_SEARCH in addons)
+    assert ("Smart names $2.00" in parts) == (SMART_NAMES in addons)
+    assert order_total(songs, addons) == total
+    if addons:
+        assert parts[-1] == f"Total ${total:.2f}"
+    else:
+        assert parts == [f"{n} {'song' if n == 1 else 'songs'} × $5.00 = ${n * 5:.2f}"]  # already the total
+    assert price_parts([object()] * 4, [AI_SEARCH, SMART_NAMES]) == [
+        "4 songs × $5.00 = $20.00", "AI search $2.00", "Smart names $2.00", "Total $24.00"]
+    assert price_line(songs, addons) == ", ".join(parts)  # the same, as one line of text
+    assert "·" not in price_line(songs, addons)
+
+
+def test_the_command_line_uses_the_same_price_line(capsys):
+    songs = [object()] * 4
+    assert price_line(songs) == "4 songs × $5.00 = $20.00"  # what the CLI prints, like the web pages
 
 
 def test_stripe_gets_a_line_for_the_songs_and_one_per_add_on(stripe_server):
@@ -932,7 +943,7 @@ def test_select_all_ticks_every_song_and_never_an_add_on(stripe_server):
     form_html = page.split('id="fix-form"')[1].split("</form>")[0]
     for addon in (AI_SEARCH, SMART_NAMES):
         assert "checked" not in form_html.split(f'id="{addon}"')[1].split(">")[0]  # add-ons untouched
-    assert f"{len(ids)} songs × $5.00 = ${len(ids) * 5:.2f} · Total ${len(ids) * 5:.2f}" in page
+    assert f'<span class="price-part">{len(ids)} songs × $5.00 = ${len(ids) * 5:.2f}</span>' in page
     # With JS on: the checkbox has no name (it's never sent) and isn't an add-on.
     box = form_html.split('id="select-all"')[0].rsplit("<input", 1)[1] + form_html.split('id="select-all"')[1].split(">")[0]
     assert "name=" not in box and "data-addon" not in box
@@ -986,15 +997,60 @@ def test_ai_search_is_never_charged_twice(stripe_server):
     assert len(stripe_server.fake.created) == created
 
 
-def test_a_paid_add_on_is_left_out_of_a_later_order(stripe_server):
+def test_add_ons_are_per_order_and_cover_only_that_orders_songs(stripe_server):
     sid, _ = ready_to_pay(stripe_server)
     red = song_ids(stripe_server, sid, status="RED")
-    pay_with(stripe_server, sid, red[:1], [AI_SEARCH])
+    yellow = song_ids(stripe_server, sid, status="YELLOW")
+    pay_with(stripe_server, sid, red[:1], [AI_SEARCH])  # order 1: one red song, with AI search
     stripe_server.fake.customer_pays("cs_test_1")
     call(stripe_server, f"/s/{sid}/paid?checkout_session_id=cs_test_1")
+    s = stripe_server.sessions.get(sid)
+    assert s.addon_songs[AI_SEARCH] == {int(red[0])}
+    # The results page offers it again, unticked: a new order pays for its own add-ons.
     _, page = text(stripe_server, f"/s/{sid}/results")
-    ai = page.split('id="ai_search"')[1].split("</label>")[0]
-    assert "data-paid" in ai and "Already paid for this visit." in ai  # shown as paid, not charged again
-    pay_with(stripe_server, sid, red, [AI_SEARCH])  # the other red song, AI search ticked again
+    ai = page.split('id="ai_search"')[1].split(">")[0]
+    assert "checked" not in ai and "data-paid" not in page
+    # Order 2: the other red song, no add-on. AI search from order 1 doesn't cover it.
+    pay_with(stripe_server, sid, red[1:] + yellow)
     params, _ = stripe_server.fake.created[-1]
-    assert [(li["quantity"], li["price_data"]["unit_amount"]) for li in params["line_items"]] == [(1, SONG_CENTS)]
+    assert [(li["quantity"], li["price_data"]["unit_amount"]) for li in params["line_items"]] == \
+        [(len(red[1:] + yellow), SONG_CENTS)]
+    stripe_server.fake.customer_pays("cs_test_2")
+    call(stripe_server, f"/s/{sid}/paid?checkout_session_id=cs_test_2")
+    assert s.addon_songs[AI_SEARCH] == {int(red[0])}
+    _, page = open_fixes(stripe_server, sid)
+    assert "Add AI search for $2" in page  # the uncovered red song can still get it, as its own order
+    # Order 3, ticking AI search again for a new red song: charged again, once, for that order.
+    # (Here: buying it on the fix page for the uncovered song.)
+    call(stripe_server, f"/s/{sid}/recheck", *form([("ai_search", "on")]))
+    params, _ = stripe_server.fake.created[-1]
+    assert [(li["quantity"], li["price_data"]["unit_amount"]) for li in params["line_items"]] == [(1, ADDON_CENTS)]
+    assert s.order["covers"] == [int(red[1])]  # only the song no order covered
+
+
+def test_ai_search_bought_with_one_order_never_runs_on_another_orders_songs(tmp_path):
+    from test_web import start as start_web
+    from retrack.mlc_client import MockClient as Mock
+    searched = []
+
+    class Recording(Mock):
+        def search_songcode(self, title, writers=()):
+            searched.append(title)
+            return super().search_songcode(title, writers)
+
+    srv = start_web(tmp_path, Recording)  # demo payments, offline AI stand-ins
+    try:
+        sid = upload_ok(srv)
+        scan(srv, sid)
+        wait_done(srv, sid)
+        results = srv.sessions.get(sid).results
+        red = [str(i) for i, r in enumerate(results) if r.status == "RED"]
+        # Two orders before the fix page opens, so both songs are worked out in the same run:
+        pay_with(srv, sid, red[:1], [AI_SEARCH])  # order 1: with AI search
+        pay_with(srv, sid, red[1:])               # order 2: without
+        open_fixes(srv, sid)
+        searched_titles = {t.upper() for t in searched}
+        assert any(results[int(red[0])].row.title.upper() in t for t in searched_titles)
+        assert not any(results[int(i)].row.title.upper() in t for i in red[1:] for t in searched_titles)
+    finally:
+        srv.shutdown(); srv.server_close(); srv.sessions.delete_all()

@@ -133,7 +133,7 @@
   }
 
   // ---- Fix pack: select all, the add-ons, the price line and the privacy text ----
-  // The server sends every possible price line (by number of songs and add-ons), each
+  // The server sends every possible price (its parts, by number of songs and add-ons), each
   // song's add-ons (data-addons) and every privacy text; the script only picks.
   var fixForm = document.getElementById("fix-form");
   if (fixForm) {
@@ -150,9 +150,9 @@
       for (var i = 0; i < addons.length; i++) if (addons[i].getAttribute("data-addon") === name) return addons[i];
       return null;
     };
-    var charged = function (name) { // ticked, and not already paid for this visit
+    var charged = function (name) { // ticked (each order pays for its own add-ons)
       var box = addon(name);
-      return box && box.checked && !box.hasAttribute("data-paid") ? "1" : "0";
+      return box && box.checked ? "1" : "0";
     };
     var update = function () {
       var ticked = songs.filter(function (s) { return s.checked; });
@@ -161,14 +161,20 @@
         all.indeterminate = ticked.length > 0 && ticked.length < songs.length;
       }
       addons.forEach(function (box) {
-        if (box.hasAttribute("data-paid")) return; // already paid: stays on, never charged again
         var name = box.getAttribute("data-addon");
         var needed = ticked.some(function (s) { return (" " + s.getAttribute("data-addons") + " ").indexOf(" " + name + " ") >= 0; });
         box.disabled = !needed;
         if (!needed) box.checked = false;
         document.getElementById(name + "-why").hidden = needed;
       });
-      total.textContent = lines[ticked.length + "|" + charged("ai_search") + charged("smart_names")];
+      var parts = lines[ticked.length + "|" + charged("ai_search") + charged("smart_names")];
+      total.textContent = "";
+      parts.forEach(function (text) { // one part per line, as the server lays it out
+        var span = document.createElement("span");
+        span.className = "price-part";
+        span.textContent = text;
+        total.appendChild(span);
+      });
       var on = function (name) { var box = addon(name); return box && box.checked ? "1" : "0"; };
       var key = on("smart_names") + on("ai_search");
       fixForm.querySelectorAll("[data-privacy]").forEach(function (list) {

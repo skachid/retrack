@@ -28,7 +28,7 @@ Small indie labels, artist managers, producers and publishers who have a catalog
   - *AI search* works out whether each red song needs registering or only linking. It's offered when a song you ticked is red.
   - *Smart names* checks writer names that don't match exactly. It's offered when a song you ticked has a writer missing at The MLC.
 
-You see the whole price before paying, for example "4 songs × $5.00 = $20.00 · AI search $2.00 · Total $22.00", and pay once for the order. If you skipped AI search, you can still add it on the fix page for $2. Nothing is ever charged twice.
+You see the whole price before paying, one part per line (4 songs × $5.00 = $20.00, AI search $2.00, Total $22.00), and pay once for the order. An add-on covers the songs in its order: if you order more songs later, tick it again for those (another $2). If you skipped AI search, you can still add it on the fix page for $2. Nothing in an order is charged twice.
 
 ## Privacy and your data
 
