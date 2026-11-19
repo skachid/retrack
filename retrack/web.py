@@ -179,7 +179,7 @@ MLC_DOWN = ("The MLC didn’t answer",
             "Wait a few minutes, then press Start the check again.")
 AI_MISSING = ("The AI checks aren’t set up on this computer",
               "Smart names and AI search need an API key for the AI service (ANTHROPIC_API_KEY, see "
-              "the README). Turn both checks off to go on without them, or set the key and restart Retrack.")
+              "docs/SETUP.md). Turn both checks off to go on without them, or set the key and restart Retrack.")
 NO_AI_CONSENT = ("Tick AI search first",
                  "These songs can only be placed with AI search, which sends their titles and writer names "
                  "out of this computer. Tick the box to allow it, then press the button again.")
@@ -914,7 +914,7 @@ def main(argv=None, open_browser=webbrowser.open):
     if server.payments.mode == TEST:
         print("Payments: Stripe test mode (no real money).")
         if not os.environ.get("STRIPE_WEBHOOK_SECRET"):
-            print("Tip: set STRIPE_WEBHOOK_SECRET so Stripe can confirm payments directly (see the README).")
+            print("Tip: set STRIPE_WEBHOOK_SECRET so Stripe can confirm payments directly (see docs/SETUP.md).")
     elif args.mock_mlc:
         print("Payments: no Stripe test keys found, so the pay button is Pay (demo).")
     elif server.payments.mode == LIVE:
