@@ -1,7 +1,9 @@
 """The fix pack: files that help the user fix the songs they choose (the paid part).
 
 The scan is free. Fixing costs a flat FIX_PRICE_USD per song, the same for every
-verdict. The web UI takes payment through Stripe (payments.py); the CLI takes none.
+verdict. The web UI also sells two optional add-ons (AI search, Smart names) at a flat
+ADDON_PRICE_USD each per order, never per song; they never change the per-song price.
+The web UI takes payment through Stripe (payments.py); the CLI takes none.
 
 What each kind of song gets:
   REGISTER ("Not found anywhere")
@@ -38,13 +40,21 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .checker import NOT_FOUND, NOT_LINKED, RED, YELLOW
+from .checker import NOT_FOUND, NOT_LINKED, RED, YELLOW, needs_ai_after_checkout
 from .compliance import ATTESTATION_TEXT, COMPLIANCE_TEXT, NEVER_TEXT
 from .mlc_client import split_name
 
 # Placeholder price, in US dollars, per fixed song. The same for every verdict:
 # don't add per-verdict prices (tests/test_fixes.py checks this).
 FIX_PRICE_USD = 5.00
+
+# Web UI only: the optional add-ons. Each is a flat price per order (not per song),
+# opt-in, and never changes the per-song price. They run only after checkout, on the
+# paid songs they apply to (checker.needs_ai_after_checkout).
+ADDON_PRICE_USD = 2.00
+AI_SEARCH, SMART_NAMES = "ai_search", "smart_names"
+ADDONS = (AI_SEARCH, SMART_NAMES)  # in the order they're listed and charged
+ADDON_LABELS = {AI_SEARCH: "AI search", SMART_NAMES: "Smart names"}
 
 REGISTER, LINK, CLAIM = "register", "link", "claim"
 # Web UI only. UNRESOLVED: a red song not placed yet (Register or Link?). It can be paid
@@ -171,10 +181,37 @@ def total_price(songs):
     return sum(price_of(r) for r in songs)
 
 
-def price_line(songs):
+def addon_applies(addon, result):
+    """Does this add-on do anything for this song? AI search: an unplaced red song.
+    Smart names: a song with writers missing from its MLC record."""
+    return needs_ai_after_checkout(result, smart_names=addon == SMART_NAMES, ai_search=addon == AI_SEARCH)
+
+
+def addons_offered(songs):
+    """The add-ons worth buying for these songs: each one only if a song needs it."""
+    return [a for a in ADDONS if any(addon_applies(a, r) for r in songs)]
+
+
+def order_total(songs, addons=()):
+    """Songs at the flat per-song price, plus each add-on once, at its flat price."""
+    return total_price(songs) + ADDON_PRICE_USD * len(set(addons))
+
+
+def price_line(songs, addons=None):
+    """The price, spelled out.
+
+    The command line (addons=None): "4 songs × $5.00 = $20.00 (same price for every verdict)".
+    The web UI (addons is a list, maybe empty):
+    "4 songs × $5.00 = $20.00 · AI search $2.00 · Smart names $2.00 · Total $24.00".
+    """
     n = len(songs)
-    return (f"{n} {'song' if n == 1 else 'songs'} × ${FIX_PRICE_USD:,.2f} = "
-            f"${total_price(songs):,.2f} (same price for every verdict)")
+    songs_part = f"{n} {'song' if n == 1 else 'songs'} × ${FIX_PRICE_USD:,.2f} = ${total_price(songs):,.2f}"
+    if addons is None:
+        return songs_part + " (same price for every verdict)"
+    parts = [songs_part] if n else []
+    parts += [f"{ADDON_LABELS[a]} ${ADDON_PRICE_USD:,.2f}" for a in ADDONS if a in addons]
+    parts.append(f"Total ${order_total(songs, addons):,.2f}")
+    return " · ".join(parts)
 
 
 # ---- Attestation -----------------------------------------------------------------
@@ -470,7 +507,7 @@ def claim_row(r):
             "Your writers missing there": ", ".join(r.missing_writers), "What to do": " ".join(r.fixes)}
 
 
-def write_fixes_workbook(plan, attestation, out_path):
+def write_fixes_workbook(plan, attestation, out_path, addons=None):
     """Everything for the paid songs in one .xlsx: Summary, Register, Link, Claim, Confirmation.
 
     Every data tab has its headers on row 1, with nothing above them. Ownership
@@ -514,7 +551,7 @@ def write_fixes_workbook(plan, attestation, out_path):
         for r in songs:
             summary.append([r.row.title, r.row.artist, r.row.isrc, *what[kind], price_of(r)])
     summary.append([])
-    summary.append(["Total", price_line(plan.songs)])
+    summary.append(["Total", price_line(plan.songs, addons)])  # addons: the paid add-ons (web UI)
     summary.append([])
     summary.append([COMPLIANCE_TEXT])
     summary.append([NEVER_TEXT])

@@ -46,10 +46,10 @@ class FakeSessions:
         if key in self.keys:  # like Stripe: the same idempotency key returns the same session
             return self.store[self.keys[key]]
         n = len(self.created) + 1
-        line = params["line_items"][0]
+        total = sum(li["quantity"] * li["price_data"]["unit_amount"] for li in params["line_items"])  # like Stripe
         s = SimpleNamespace(id=f"cs_test_{n}", url=f"https://checkout.stripe.test/pay/cs_test_{n}", status="open",
                             payment_status="unpaid", client_reference_id=params["client_reference_id"],
-                            amount_total=line["quantity"] * line["price_data"]["unit_amount"])
+                            amount_total=total)
         self.created.append((params, options))
         self.store[s.id], self.keys[key] = s, s.id
         return s
@@ -190,9 +190,10 @@ def stripe_server(tmp_path):
     srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
 
-def ready_to_pay(srv):
+def ready_to_pay(srv, **addons):
+    """Scanned, with every song on offer. addons (ai_search=True...) go with each pay()."""
     sid = upload_ok(srv)
-    scan(srv, sid, ai_search=True)
+    scan(srv, sid, **addons)
     wait_done(srv, sid)
     ids = fixable_ids(text(srv, f"/s/{sid}/results")[1])
     return sid, ids
@@ -379,7 +380,7 @@ def test_privacy_page_says_how_payments_work(stripe_server, tmp_path):
 @pytest.fixture
 def paid(tmp_path):
     srv = start(tmp_path, DemoPayments())
-    sid, ids = ready_to_pay(srv)
+    sid, ids = ready_to_pay(srv, ai_search=True)  # the AI search add-on places the red songs
     pay(srv, sid, ids)
     open_fixes(srv, sid)  # like a customer: the first visit runs the after-checkout checks
     yield srv, sid
@@ -790,3 +791,210 @@ def test_mock_mlc_still_refuses_a_live_key(monkeypatch, capsys):
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_live_abc")
     assert web.main(["--mock-mlc", "--port", "0"], open_browser=None) == 1
     assert "RETRACK_PAYMENTS_LIVE=1" in capsys.readouterr().err
+
+
+# ---- Add-ons: AI search and Smart names, a flat price per order ------------------------------
+
+from retrack import web_pages as pages  # noqa: E402
+from retrack.fixes import (ADDON_PRICE_USD, AI_SEARCH, SMART_NAMES, addons_offered,  # noqa: E402
+                           order_total, price_line, sold_kind)
+
+ADDON_CENTS = round(ADDON_PRICE_USD * 100)
+SONG_CENTS = round(FIX_PRICE_USD * 100)
+
+
+def song_ids(srv, sid, status=None):
+    """The songs on offer (as form values), optionally only red or only yellow ones."""
+    results = srv.sessions.get(sid).results
+    return [str(i) for i, r in enumerate(results) if sold_kind(r) and (status is None or r.status == status)]
+
+
+def pay_with(srv, sid, ids, addons=(), attest=True):
+    fields = [("song", i) for i in ids] + [(a, "on") for a in addons] + ([("attest", "yes")] if attest else [])
+    return call(srv, f"/s/{sid}/pay", *form(fields))
+
+
+def test_add_on_prices_are_constants_and_flat_per_order():
+    assert FIX_PRICE_USD == 5.00 and ADDON_PRICE_USD == 2
+    songs = [object()] * 7
+    assert order_total(songs, [AI_SEARCH]) == 7 * FIX_PRICE_USD + 2  # not per song
+    assert order_total(songs, [AI_SEARCH, AI_SEARCH]) == 7 * FIX_PRICE_USD + 2  # never twice
+
+
+@pytest.mark.parametrize("n", [1, 4])
+@pytest.mark.parametrize("addons", [[], [AI_SEARCH], [SMART_NAMES], [AI_SEARCH, SMART_NAMES]])
+def test_the_price_line_and_total_for_every_combination(n, addons):
+    songs = [object()] * n
+    line = price_line(songs, addons)
+    total = n * FIX_PRICE_USD + 2 * len(addons)
+    assert line.startswith(f"{n} {'song' if n == 1 else 'songs'} × $5.00 = ${n * 5:.2f}")
+    assert ("AI search $2.00" in line) == (AI_SEARCH in addons)
+    assert ("Smart names $2.00" in line) == (SMART_NAMES in addons)
+    assert line.endswith(f"Total ${total:.2f}") and order_total(songs, addons) == total
+    assert price_line([object()] * 4, [AI_SEARCH, SMART_NAMES]) == \
+        "4 songs × $5.00 = $20.00 · AI search $2.00 · Smart names $2.00 · Total $24.00"
+    assert price_line(songs).endswith("(same price for every verdict)")  # the command line keeps its line
+
+
+def test_stripe_gets_a_line_for_the_songs_and_one_per_add_on(stripe_server):
+    sid, _ = ready_to_pay(stripe_server)
+    ids = song_ids(stripe_server, sid)
+    status, headers, _ = pay_with(stripe_server, sid, ids, [AI_SEARCH, SMART_NAMES])
+    assert status == 303 and headers["Location"].startswith("https://checkout.stripe.test/")
+    params, _ = stripe_server.fake.created[0]
+    items = [(li["quantity"], li["price_data"]["unit_amount"], li["price_data"]["product_data"]["name"])
+             for li in params["line_items"]]
+    assert items == [(len(ids), SONG_CENTS, payments_mod.PRODUCT_NAME),
+                     (1, ADDON_CENTS, payments_mod.ADDON_PRODUCT_NAMES[AI_SEARCH]),
+                     (1, ADDON_CENTS, payments_mod.ADDON_PRODUCT_NAMES[SMART_NAMES])]
+    order = stripe_server.sessions.get(sid).order
+    assert order["amount"] == len(ids) * SONG_CENTS + 2 * ADDON_CENTS  # the full total is what's checked
+
+
+@pytest.mark.parametrize("addons", [[], [AI_SEARCH], [SMART_NAMES], [AI_SEARCH, SMART_NAMES]])
+def test_paying_unlocks_exactly_the_add_ons_paid_for(stripe_server, addons):
+    sid, _ = ready_to_pay(stripe_server)
+    ids = song_ids(stripe_server, sid)
+    pay_with(stripe_server, sid, ids, addons)
+    stripe_server.fake.customer_pays("cs_test_1")
+    status, headers, _ = call(stripe_server, f"/s/{sid}/paid?checkout_session_id=cs_test_1")
+    assert status == 303 and headers["Location"].endswith("/fixes")
+    s = stripe_server.sessions.get(sid)
+    assert {a for a in (AI_SEARCH, SMART_NAMES) if s.settings[a]} == set(addons)  # only those run after checkout
+
+
+def test_a_tampered_amount_is_rejected(stripe_server):
+    sid, _ = ready_to_pay(stripe_server)
+    ids = song_ids(stripe_server, sid)
+    pay_with(stripe_server, sid, ids, [AI_SEARCH])
+    stripe_server.fake.customer_pays("cs_test_1")
+    stripe_server.fake.store["cs_test_1"].amount_total -= ADDON_CENTS  # paid for the songs only
+    status, headers, _ = call(stripe_server, f"/s/{sid}/paid?checkout_session_id=cs_test_1")
+    assert "/fixes" not in headers.get("Location", "")
+    s = stripe_server.sessions.get(sid)
+    assert s.paid_songs == [] and s.settings[AI_SEARCH] is False  # nothing unlocked, no AI
+
+
+def test_changing_the_add_ons_changes_the_order(stripe_server):
+    sid, _ = ready_to_pay(stripe_server)
+    ids = song_ids(stripe_server, sid)
+    pay_with(stripe_server, sid, ids)
+    pay_with(stripe_server, sid, ids, [AI_SEARCH])  # same songs, one add-on more
+    assert stripe_server.fake.expired == ["cs_test_1"] and len(stripe_server.fake.created) == 2
+    pay_with(stripe_server, sid, ids, [AI_SEARCH])  # the same order again: reused, not a new charge
+    assert len(stripe_server.fake.created) == 2
+
+
+def test_an_add_on_no_ticked_song_needs_cant_be_bought(stripe_server):
+    sid, _ = ready_to_pay(stripe_server)
+    yellow = song_ids(stripe_server, sid, status="YELLOW")
+    red = song_ids(stripe_server, sid, status="RED")
+    status, _, body = pay_with(stripe_server, sid, yellow, [AI_SEARCH])
+    assert status == 400 and "AI search isn’t needed for these songs" in body.decode()
+    status, _, body = pay_with(stripe_server, sid, red, [SMART_NAMES])  # red songs have no writers to compare
+    assert status == 400 and "Smart names isn’t needed for these songs" in body.decode()
+    assert stripe_server.fake.created == []  # no checkout, nothing charged
+
+
+def test_disabled_add_ons_say_why():
+    session = SimpleNamespace(id="x" * 22, paid_songs=[], settings={AI_SEARCH: False, SMART_NAMES: False},
+                              results=[])
+    html = pages._addons_html(session, offered=[SMART_NAMES], chosen=[], mock=False)
+    ai = html.split('id="ai_search"')[1].split("</label>")[0]
+    assert " disabled " in ai.split(">")[0] + " " and "Only needed for red songs." in ai
+    assert 'id="ai_search-why" class="addon-why">' in ai  # the reason is shown, not hidden
+    names = html.split('id="smart_names"')[1].split("</label>")[0]
+    assert "disabled" not in names.split(">")[0] and 'class="addon-why" hidden' in names
+
+
+def test_add_ons_follow_the_ticked_songs(stripe_server):
+    sid, _ = ready_to_pay(stripe_server)
+    results = stripe_server.sessions.get(sid).results
+    yellow = [results[int(i)] for i in song_ids(stripe_server, sid, status="YELLOW")]
+    red = [results[int(i)] for i in song_ids(stripe_server, sid, status="RED")]
+    assert AI_SEARCH not in addons_offered(yellow) and AI_SEARCH in addons_offered(red)
+    assert SMART_NAMES not in addons_offered(red)
+    # each song row says which add-ons it can use, so the page's script can grey the others out
+    _, page = text(stripe_server, f"/s/{sid}/results")
+    for i in song_ids(stripe_server, sid, status="RED"):
+        assert f'value="{i}" data-addons="ai_search"' in page
+
+
+def test_select_all_ticks_every_song_and_never_an_add_on(stripe_server):
+    sid, _ = ready_to_pay(stripe_server)
+    ids = song_ids(stripe_server, sid)
+    # With JS off: the "Select all songs" button sends the form back with every song ticked.
+    status, _, body = call(stripe_server, f"/s/{sid}/fix", *form([("select_all", "1")]))
+    page = body.decode()
+    assert status == 200
+    for i in ids:
+        assert f'name="song" value="{i}" checked' in page
+    form_html = page.split('id="fix-form"')[1].split("</form>")[0]
+    for addon in (AI_SEARCH, SMART_NAMES):
+        assert "checked" not in form_html.split(f'id="{addon}"')[1].split(">")[0]  # add-ons untouched
+    assert f"{len(ids)} songs × $5.00 = ${len(ids) * 5:.2f} · Total ${len(ids) * 5:.2f}" in page
+    # With JS on: the checkbox has no name (it's never sent) and isn't an add-on.
+    box = form_html.split('id="select-all"')[0].rsplit("<input", 1)[1] + form_html.split('id="select-all"')[1].split(">")[0]
+    assert "name=" not in box and "data-addon" not in box
+    assert "Select all songs" in form_html and stripe_server.fake.created == []
+    script = (ROOT / "retrack" / "home.js").read_text()
+    handler = script.split('all.addEventListener("change"')[1].split("});")[0]
+    assert "songs.forEach" in handler and "addons" not in handler  # the script ticks songs only
+    assert "indeterminate" in script  # a partial selection shows as mixed
+
+
+def _paid_without_ai_search(srv):
+    sid, _ = ready_to_pay(srv)
+    ids = song_ids(srv, sid)
+    pay_with(srv, sid, ids)
+    srv.fake.customer_pays("cs_test_1")
+    call(srv, f"/s/{sid}/paid?checkout_session_id=cs_test_1")
+    open_fixes(srv, sid)
+    return sid, ids
+
+
+def test_the_ai_search_add_on_alone_can_be_bought_on_the_fix_page(stripe_server):
+    sid, ids = _paid_without_ai_search(stripe_server)
+    _, page = open_fixes(stripe_server, sid)
+    assert "Add AI search for $2" in page
+    status, headers, _ = call(stripe_server, f"/s/{sid}/recheck", *form([("ai_search", "on")]))
+    assert status == 303 and headers["Location"] == "https://checkout.stripe.test/pay/cs_test_2"
+    params, _ = stripe_server.fake.created[-1]
+    assert [(li["quantity"], li["price_data"]["unit_amount"]) for li in params["line_items"]] == [(1, ADDON_CENTS)]
+    assert params["cancel_url"].endswith(f"/s/{sid}/fixes")
+    s = stripe_server.sessions.get(sid)
+    assert s.order["songs"] == [] and s.order["amount"] == ADDON_CENTS
+    stripe_server.fake.customer_pays("cs_test_2")
+    status, headers, _ = call(stripe_server, f"/s/{sid}/paid?checkout_session_id=cs_test_2")
+    assert headers["Location"].endswith("/fixes")
+    status, page = open_fixes(stripe_server, sid)  # "Working out…", then the red songs are placed
+    assert status == 200 and s.settings[AI_SEARCH] is True
+    assert 'class="needs-search"' not in page
+    assert s.paid_songs == sorted(int(i) for i in ids)  # no song charged or added again
+
+
+def test_ai_search_is_never_charged_twice(stripe_server):
+    sid, ids = _paid_without_ai_search(stripe_server)
+    call(stripe_server, f"/s/{sid}/recheck", *form([("ai_search", "on")]))
+    stripe_server.fake.customer_pays("cs_test_2")
+    call(stripe_server, f"/s/{sid}/paid?checkout_session_id=cs_test_2")
+    open_fixes(stripe_server, sid)
+    created = len(stripe_server.fake.created)
+    # Asking again runs it again for free: no new checkout.
+    status, headers, _ = call(stripe_server, f"/s/{sid}/recheck", *form([("ai_search", "on")]))
+    assert status == 303 and not headers["Location"].startswith("https://")
+    assert len(stripe_server.fake.created) == created
+
+
+def test_a_paid_add_on_is_left_out_of_a_later_order(stripe_server):
+    sid, _ = ready_to_pay(stripe_server)
+    red = song_ids(stripe_server, sid, status="RED")
+    pay_with(stripe_server, sid, red[:1], [AI_SEARCH])
+    stripe_server.fake.customer_pays("cs_test_1")
+    call(stripe_server, f"/s/{sid}/paid?checkout_session_id=cs_test_1")
+    _, page = text(stripe_server, f"/s/{sid}/results")
+    ai = page.split('id="ai_search"')[1].split("</label>")[0]
+    assert "data-paid" in ai and "Already paid for this visit." in ai  # shown as paid, not charged again
+    pay_with(stripe_server, sid, red, [AI_SEARCH])  # the other red song, AI search ticked again
+    params, _ = stripe_server.fake.created[-1]
+    assert [(li["quantity"], li["price_data"]["unit_amount"]) for li in params["line_items"]] == [(1, SONG_CENTS)]

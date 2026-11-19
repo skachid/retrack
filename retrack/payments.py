@@ -2,8 +2,9 @@
 
 The customer pays on Stripe's own page (hosted Checkout, guest checkout, no
 accounts), so Retrack never sees or stores a card number. Retrack only:
-  1. creates a Checkout Session for N songs at FIX_PRICE_USD each (one
-     payment for the whole order, never one per song), and
+  1. creates a Checkout Session for the whole order (one payment, never one
+     per song): one line for N songs at FIX_PRICE_USD each, plus one line per
+     add-on at ADDON_PRICE_USD, and
   2. when the customer comes back, looks that session up with Stripe's API
      and unlocks the fixes only if Stripe says it's paid (web.py checks it
      also belongs to this visitor's Retrack session). The return URL alone
@@ -33,6 +34,8 @@ DEMO_BANNER = "Demo payment: Pay (demo) skips Stripe, so nothing is charged."
 # Tags these sessions in the Stripe Dashboard (Stripe asks for a label ending in 8 random letters).
 INTEGRATION_ID = "retrack_fix_pack_kqvzhmwd"
 PRODUCT_NAME = "Retrack fix (per song)"
+ADDON_PRODUCT_NAMES = {"ai_search": "Retrack add-on: AI search (per order)",
+                       "smart_names": "Retrack add-on: Smart names (per order)"}
 
 
 class PaymentConfigError(Exception):
@@ -170,22 +173,30 @@ class StripePayments:
     def __repr__(self):
         return f"StripePayments(mode={self.mode!r})"  # no key in logs or tracebacks
 
-    def create_checkout(self, reference, quantity, unit_amount_cents, success_url, cancel_url, idempotency_key):
-        """One Checkout Session for the whole order: one line, quantity N."""
+    def create_checkout(self, reference, quantity, unit_amount_cents, success_url, cancel_url, idempotency_key,
+                        addons=()):
+        """One Checkout Session for the whole order: the songs as one line (quantity N),
+        plus one line (quantity 1) for each add-on, given as (name, cents) pairs. An order
+        of add-ons only (bought later, on the fix page) has no songs line."""
+        line_items = []
+        if quantity:
+            line_items.append({"quantity": quantity,
+                               "price_data": {"currency": "usd", "unit_amount": unit_amount_cents,
+                                              "product_data": {"name": PRODUCT_NAME}}})
+        for name, cents in addons:
+            line_items.append({"quantity": 1,
+                               "price_data": {"currency": "usd", "unit_amount": cents,
+                                              "product_data": {"name": ADDON_PRODUCT_NAMES[name]}}})
         params = {
             "mode": "payment",
             "client_reference_id": reference,
-            "line_items": [{
-                "quantity": quantity,
-                "price_data": {"currency": "usd", "unit_amount": unit_amount_cents,
-                               "product_data": {"name": PRODUCT_NAME}},
-            }],
+            "line_items": line_items,
             "success_url": success_url,
             "cancel_url": cancel_url,
             "metadata": {"retrack_session": reference},
             # Managed Payments (Stripe as merchant of record, adding tax) is on by default on
             # new accounts and needs a product tax code. It's off here, so the customer pays
-            # exactly quantity × price and the amount_total check in web.py stays exact.
+            # exactly the line items' total and the amount_total check in web.py stays exact.
             "managed_payments": {"enabled": False},
             "integration_identifier": INTEGRATION_ID,
         }

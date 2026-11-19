@@ -22,8 +22,8 @@ ORDER = (ISRCS, SONG_CODES, TITLES, WRITER_NAMES)
 class Flows:
     mlc: frozenset          # what the free check sends to The MLC's Public Search API
     claude: frozenset       # what the free check sends to the AI service: always nothing now
-    mlc_paid: frozenset     # sent to The MLC after checkout, for the paid songs only
-    claude_paid: frozenset  # sent to the AI service after checkout, for the paid songs only
+    mlc_paid: frozenset     # sent to The MLC after checkout: paid songs, paid add-ons only
+    claude_paid: frozenset  # sent to the AI service after checkout: paid songs, paid add-ons only
 
     @property
     def mlc_all(self):
@@ -39,7 +39,8 @@ def data_flows(smart_names=False, ai_search=False, mock=False):
 
     - The free check: ISRCs (POST /search/recordings) and MLC song codes (POST /works)
       to The MLC. Nothing to the AI service, whatever the settings.
-    - After checkout, for the paid songs only:
+    - After checkout, for the paid songs only, and only for the add-ons bought
+      (smart_names / ai_search here mean "this paid add-on is in the order"):
         AI search (red songs): song titles and writer names to The MLC's song search
         (POST /search/songcode), and to Claude (variants, then "same song?").
         Smart names (songs with a missing writer): pairs of writer names to Claude.
@@ -79,15 +80,15 @@ def privacy_items(smart_names=False, ai_search=False, mock=False):
     else:
         mlc_sentence = "Only those, through its Public Search API. Never the whole file."
         if flows.mlc_paid:
-            mlc_sentence += (f" After checkout, AI search also sends it the {_listed(flows.mlc_paid)} "
-                             "of the songs you pay for.")
+            mlc_sentence += (f" After checkout, the AI search add-on also sends it the "
+                             f"{_listed(flows.mlc_paid)} of the songs you pay for.")
         mlc = (f"To The MLC: {_listed(flows.mlc)}.", mlc_sentence)
         if flows.claude_paid:
             claude = (f"To an AI service, after checkout: {_listed(flows.claude_paid)}.",
-                      "Only for the songs you pay for, and only for the extra checks you turned on. The free "
+                      "Only for the songs you pay for, and only for the add-ons you buy. The free "
                       "check sends nothing there. ISRCs, audio and money figures never go there.")
         else:
-            claude = ("Nothing goes to an AI service.", "The extra checks are off.")
+            claude = ("Nothing goes to an AI service.", "No add-ons are chosen.")
     return [KEPT, mlc, claude, NO_AUDIO]
 
 

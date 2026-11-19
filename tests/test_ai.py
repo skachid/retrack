@@ -19,7 +19,7 @@ from retrack.importer import ClaudeColumnMapper
 from retrack.name_matcher import ClaudeNameMatcher
 from retrack.work_search import ClaudeWorkSearcher
 
-from test_web import call, fixable_ids, open_fixes, pay_all, scanned, start, text
+from test_web import call, fixable_ids, form, open_fixes, pay_all, scanned, start, text
 
 
 class FakeClaude:
@@ -187,7 +187,7 @@ def test_the_free_check_never_calls_the_ai(real):
 
 
 def test_after_checkout_the_ai_runs_only_on_the_paid_songs(real):
-    sid = scanned(real, smart_names=True, ai_search=True)
+    sid = scanned(real, ai_search=True)  # Blue Hour is red: AI search is the add-on it can use
     results = real.sessions.get(sid).results
     blue = str(next(i for i, r in enumerate(results) if r.row.title == "Blue Hour"))
     pay_all(real, sid, [blue])
@@ -199,7 +199,8 @@ def test_after_checkout_the_ai_runs_only_on_the_paid_songs(real):
     assert "Blue Hour" in sent
     for unpaid in ("Ghost Signal", "Paper Crowns", "Concrete Garden", "Nova Reyes", "Marcus Bell", "Sam Lee"):
         assert unpaid not in sent, unpaid  # never a song that wasn't paid for
-    assert "Paid: 1 song × $5.00 = $5.00" in page  # the price doesn't change
+    # the song price doesn't change; the add-on is a flat $2 for the order
+    assert "Paid: 1 song × $5.00 = $5.00 · AI search $2.00 · Total $7.00" in page
 
 
 def test_the_progress_page_says_it_is_working_out_the_fixes():
@@ -251,10 +252,11 @@ def test_the_cost_of_each_order_is_logged_without_catalog_data(real):
             assert value not in line
 
 
-def test_smart_names_after_checkout_only_looks_at_paid_songs(real):
-    sid = scanned(real, smart_names=True)  # AI search off
+def test_smart_names_cant_be_bought_for_songs_that_dont_need_it(real):
+    sid = scanned(real)
     results = real.sessions.get(sid).results
     ghost = str(next(i for i, r in enumerate(results) if r.row.title == "Ghost Signal"))
-    pay_all(real, sid, [ghost])  # a red song: it has no writers to compare
-    open_fixes(real, sid)
-    assert real.claude.requests == []
+    # A red song has no writers to compare: Smart names is greyed out, and sending it anyway is refused.
+    status, _, body = call(real, f"/s/{sid}/pay", *form([("song", ghost), ("smart_names", "on"), ("attest", "yes")]))
+    assert status == 400 and "Smart names isn’t needed for these songs" in body.decode()
+    assert real.sessions.get(sid).paid_songs == [] and real.claude.requests == []  # nothing charged, no AI

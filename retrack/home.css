@@ -142,6 +142,8 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
 
 /* Privacy: what leaves this computer */
 .privacy { margin-top: var(--space-2xl); padding-top: var(--space-lg); border-top: 3px double var(--color-rule-2); }
+.privacy--addons { margin-top: var(--space-xl); padding-top: 0; border-top: 0; max-width: 70ch; }
+.privacy--addons h3 { font-size: var(--text-md); font-weight: 600; }
 .privacy-list { list-style: none; padding: 0; margin: var(--space-lg) 0 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-lg) var(--gap-columns); }
 .privacy-list[hidden] { display: none; }
 .privacy-list li { margin: 0; padding-top: var(--space-sm); border-top: var(--rule-hair) solid var(--color-rule); }
@@ -223,6 +225,12 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
 .fix-kind { color: var(--color-ink-2); }
 .fix-skip { padding-block: var(--space-md); color: var(--color-ink-2); }
 .fix-total { margin-block: var(--space-lg); font-size: var(--text-lg); font-variant-numeric: tabular-nums; }
+.fix-all { margin-top: var(--space-xl); }
+.fix-all-box { display: inline-flex; gap: var(--space-md); align-items: center; cursor: pointer; font-weight: 600; }
+.fix-all + .fix-list { margin-top: var(--space-md); }
+.addon-why { display: block; margin-top: var(--space-2xs); color: var(--color-muted); }
+.addon-why[hidden] { display: none; }
+.switch:has(input:disabled) { cursor: not-allowed; color: var(--color-muted); }
 
 /* Review and download */
 .price { font-variant-numeric: tabular-nums; }

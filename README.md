@@ -17,14 +17,24 @@ Small indie labels, artist managers, producers and publishers who have a catalog
    | 🟡 Yellow | The song is there, but shares don't add up to 100%, nobody's collecting, or writers are missing. |
    | 🟢 Green | Registered, fully claimed, writers match. |
 
-3. **Pay for fixes.** Tick the songs you want fixed. It's one flat price per song, whatever the colour. You can turn on two optional extra checks that run after checkout, on the paid songs only. You confirm that you reviewed the data and control the shares, then pay once on Stripe's checkout page.
+3. **Pay for fixes.** Tick the songs you want fixed, and add either optional extra check if it helps (see pricing below). You confirm that you reviewed the data and control the shares, then pay once on Stripe's checkout page.
 4. **Fix page.** Each paid song is grouped by what to do (Register, Link or Claim), with what Retrack filled in, the fields you must fill in yourself, short steps, and a spreadsheet to download. Where it applies, you also get the file in The MLC's own format. Retrack never submits anything for you.
+
+## Pricing
+
+- **The check is free.** Every song is checked at The MLC, with no AI and no charge.
+- **$5 per song you want fixed**, the same price whatever the colour.
+- **Two optional add-ons, $2 each per order** (not per song), off unless you tick them:
+  - *AI search* works out whether each red song needs registering or only linking. It's offered when a song you ticked is red.
+  - *Smart names* checks writer names that don't match exactly. It's offered when a song you ticked has a writer missing at The MLC.
+
+You see the whole price before paying, for example "4 songs × $5.00 = $20.00 · AI search $2.00 · Total $22.00", and pay once for the order. If you skipped AI search, you can still add it on the fix page for $2. Nothing is ever charged twice.
 
 ## Privacy and your data
 
 - **Your file stays on the computer running Retrack.** It's deleted after 60 minutes, when you press *Delete my files now*, or when Retrack stops.
 - **Only what's needed goes to The MLC:** the ISRCs and MLC song codes, never the whole file.
-- **The AI is opt-in and runs only after checkout.** The free check never uses it. If you turn on Smart names or AI search, only the titles and writer names of the songs you pay for are sent. ISRCs, audio and money figures never are.
+- **The AI is opt-in and runs only after checkout.** The free check never uses it. If you buy Smart names or AI search, only the titles and writer names of the songs you pay for are sent. ISRCs, audio and money figures never are.
 - **Retrack never sees your card.** Stripe's own page takes it.
 - **No audio, no training.** Retrack never touches your recordings and never learns from your catalog.
 - Retrack never logs into your MLC Portal and never asks for your Portal password.

@@ -59,9 +59,10 @@ from . import web_pages as pages
 from .ai import (DAILY_LIMIT_ENV, AIConfigError, DailySpend, MeteredClient, daily_limit_from_env)
 from .checker import RED, check_row, load_catalog, needs_ai_after_checkout
 from .env import load_env
-from .fixes import (FIX_PRICE_USD, UNRESOLVED, FixPackError, bulk_match_name, confirm, fixes_workbook_name,
-                    open_template, plan_fixes, sold_kind, split_for_template, total_price, write_bulk_match,
-                    write_fixes_workbook, write_template_copy)
+from .fixes import (ADDON_PRICE_USD, ADDONS, AI_SEARCH, FIX_PRICE_USD, UNRESOLVED, FixPackError, addon_applies,
+                    addons_offered, bulk_match_name, confirm, fixes_workbook_name, open_template, order_total,
+                    plan_fixes, sold_kind, split_for_template, write_bulk_match, write_fixes_workbook,
+                    write_template_copy)
 from .payments import (DEMO, LIVE, TEST, WEBHOOK_EVENTS, PaymentConfigError, PaymentError, WebhookError,
                        checkout_from_event, payments_from_env, verify_webhook)
 from .importer import (FIELDS, REQUIRED, CatalogImportError, FieldMap, HeaderRuleMapper, clean_mapping,
@@ -180,6 +181,14 @@ MLC_DOWN = ("The MLC didn’t answer",
 AI_MISSING = ("The AI checks aren’t set up on this computer",
               "Smart names and AI search need an API key for the AI service (ANTHROPIC_API_KEY, see "
               "docs/SETUP.md). Turn both checks off to go on without them, or set the key and restart Retrack.")
+ADDON_NOT_NEEDED = {
+    "ai_search": ("AI search isn’t needed for these songs",
+                  "AI search is only for red songs, and none of the songs you ticked is red. Untick it, "
+                  "then press the button again. Nothing was charged."),
+    "smart_names": ("Smart names isn’t needed for these songs",
+                    "Smart names is only for songs with a writer missing at The MLC, and none of the songs "
+                    "you ticked has one. Untick it, then press the button again. Nothing was charged."),
+}
 NO_AI_CONSENT = ("Tick AI search first",
                  "These songs can only be placed with AI search, which sends their titles and writer names "
                  "out of this computer. Tick the box to allow it, then press the button again.")
@@ -245,16 +254,34 @@ def order_is_paid(session, checkout):
             and checkout.amount_total == order["amount"])
 
 
-def mark_paid(session, songs):
-    """Unlock these songs. Doing it twice changes nothing (idempotent).
+def mark_paid(session, songs, addons=()):
+    """Unlock these songs and add-ons. Doing it twice changes nothing (idempotent).
 
     Each newly paid song also adds MAX_SEARCHES AI calls to what this session may
-    use after checkout: the per-order AI limit (see ai.py).
+    use after checkout: the per-order AI limit (see ai.py). A paid add-on is switched
+    on in session.settings, which is what runs after checkout. An add-on bought later
+    (on the fix page) sends the paid songs it applies to back to be worked out.
     """
     new = set(songs) - set(session.paid_songs)
     session.ai_budget.add_songs(len(new), MAX_SEARCHES)
     session.paid_songs = sorted(set(session.paid_songs) | set(songs))
+    new_addons = [a for a in addons if not session.settings.get(a)]
+    session.settings = dict(session.settings, **{a: True for a in addons})
+    if new_addons:
+        session.finished -= {i for i in session.paid_songs
+                             if any(addon_applies(a, session.results[i]) for a in new_addons)}
     session.order = None
+
+
+def paid_addons(session):
+    """The add-ons paid for this visit, in the order they're listed."""
+    return [a for a in ADDONS if session.settings.get(a)]
+
+
+def unlock_order(session):
+    """Stripe confirmed the open order: unlock what it was for."""
+    order = session.order
+    mark_paid(session, order["songs"], order.get("addons", []))
 
 
 # ---- The server ------------------------------------------------------------------------------
@@ -525,23 +552,30 @@ def make_handler(config):
             self._start_free_check(session)
 
         def post_recheck(self, session):
-            """After checkout: AI search for the paid red songs that couldn't be placed
-            because AI search was off. Only those, and only with the box ticked."""
+            """On the fix page: add AI search for the paid red songs nobody could place yet.
+
+            AI search is a paid add-on. Not bought yet: its own small checkout (that add-on
+            only, ADDON_PRICE_USD), then it runs on those songs. Already bought: it runs
+            again without any charge. Only with the box ticked (the user's OK to send).
+            """
             if self._need_paid(session):
                 return
             if session.state != "done":
                 return self._redirect(f"/s/{session.id}/progress")
             form = self._form()
-            if "ai_search" not in form:  # the box is the user's OK to send titles and writer names
-                return self._send_fixes(session, 400, recheck_error=NO_AI_CONSENT)
             todo = [i for i in session.paid_songs if sold_kind(session.results[i]) == UNRESOLVED]
             if not todo:
                 return self._redirect(f"/s/{session.id}/fixes")
-            tools = self._ai_tools(session, smart_names=False, ai_search=True)
-            if tools is None:
-                return self._send_fixes(session, 503, recheck_error=AI_MISSING)
-            session.settings = dict(session.settings, ai_search=True)  # so the privacy copy says so
-            self._start(session, todo, *tools, phase="finish")
+            if "ai_search" not in form:  # the box is the user's OK to send titles and writer names
+                return self._send_fixes(session, 400, recheck_error=NO_AI_CONSENT)
+            if not mock and self._ai_tools(session, smart_names=False, ai_search=True) is None:
+                return self._send_fixes(session, 503, recheck_error=AI_MISSING)  # before any charge
+            if session.settings["ai_search"]:  # already paid for: never charged twice
+                tools = self._ai_tools(session, smart_names=False, ai_search=True)
+                return self._start(session, todo, *tools, phase="finish")
+            error = self._checkout(session, [], [AI_SEARCH], cancel_path="fixes")
+            if error:
+                self._send_fixes(session, 502, recheck_error=error)
 
         def get_progress(self, session):
             if session.state == "done":
@@ -611,79 +645,130 @@ def make_handler(config):
             except PaymentError:
                 return
             if order_is_paid(session, checkout):
-                mark_paid(session, session.order["songs"])
+                unlock_order(session)
+
+        def _order_from_form(self, session, form):
+            """The songs and add-ons a form asks for, checked against the rules.
+
+            Returns (songs, addons, error). Songs already paid for are dropped (never charged
+            again), and so are add-ons already paid for this visit. An add-on none of the
+            songs needs (it was shown disabled) can't be bought: that's an error.
+            """
+            songs = [i for i in self._chosen(session, form.get("song", [])) if i not in session.paid_songs]
+            asked = [a for a in ADDONS if a in form and not session.settings.get(a)]
+            offered = addons_offered([session.results[i] for i in songs])
+            for a in asked:
+                if a not in offered:
+                    return songs, [], ADDON_NOT_NEEDED[a]
+            return songs, asked, None
+
+        def _ai_set_up(self, addons):
+            """Say now, before paying, if an add-on was chosen but the AI isn't set up."""
+            if not addons or mock:
+                return True
+            try:
+                config.make_claude()
+                return True
+            except Exception:  # no anthropic package, no API key...
+                return False
+
+        def _results_again(self, session, status, form, error=None):
+            """The results page again, keeping what was ticked."""
+            selected = self._chosen(session, form.get("song", []))
+            addons = [a for a in ADDONS if a in form]
+            self._send(status, pages.results_page(session, mock, error=error, selected=selected, addons=addons))
 
         def post_fix(self, session):
             if session.state != "done":
                 return self._redirect(f"/s/{session.id}/progress")
-            chosen = [i for i in self._chosen(session, self._form().get("song", [])) if i not in session.paid_songs]
+            form = self._form()
+            if "select_all" in form:  # the no-JS "Select all songs" button: tick every song, nothing else
+                every = [i for i, r in enumerate(session.results) if sold_kind(r) and i not in session.paid_songs]
+                form = dict(form, song=[str(i) for i in every])
+                return self._results_again(session, 200, form)
+            chosen, addons, error = self._order_from_form(session, form)
             if not chosen:
-                return self._send(400, pages.results_page(session, mock, error=(
-                    "No songs ticked", "Tick at least one song to fix, then press Review my fix pack.")))
+                return self._results_again(session, 400, form, error=(
+                    "No songs ticked", "Tick at least one song to fix, then press Review my fix pack."))
+            if error:
+                return self._results_again(session, 400, form, error=error)
+            if not self._ai_set_up(addons):
+                return self._results_again(session, 503, form, error=AI_MISSING)
             plan = plan_fixes([session.results[i] for i in chosen], sell_red=True)
-            self._send(200, pages.pay_page(session, plan, chosen, mock, config.payments.mode))
+            self._send(200, pages.pay_page(session, plan, chosen, mock, config.payments.mode, addons=addons))
 
         def post_pay(self, session):
             if session.state != "done":
                 return self._redirect(f"/s/{session.id}/progress")
             form = self._form()
-            # Songs already paid for are never charged again.
-            chosen = [i for i in self._chosen(session, form.get("song", [])) if i not in session.paid_songs]
+            chosen, addons, error = self._order_from_form(session, form)
             if not chosen:
                 return self._redirect(f"/s/{session.id}/{'fixes' if session.paid_songs else 'results'}")
+            if error:  # a disabled add-on sent anyway: charge nothing
+                return self._results_again(session, 400, form, error=error)
             plan = plan_fixes([session.results[i] for i in chosen], sell_red=True)
-            # The extra checks are chosen here and run only after checkout, on these songs.
-            session.settings = {"smart_names": "smart_names" in form, "ai_search": "ai_search" in form}
 
             # No attestation, no fix pack: checked here, on the server, not just by the
             # checkbox's "required" attribute (which a browser or script can skip).
             if form.get("attest") != ["yes"]:
-                return self._send(400, pages.pay_page(session, plan, chosen, mock, config.payments.mode, error=(
+                return self._send(400, pages.pay_page(session, plan, chosen, mock, config.payments.mode,
+                                                      addons=addons, error=(
                     "No confirmation, no fix pack",
                     "Tick the box to confirm you reviewed the data and control the shares, then press "
                     "the button again. Nothing was charged.")))
-            if (session.settings["smart_names"] or session.settings["ai_search"]) and not mock:
-                # The AI only runs after checkout, but say now if it isn't set up, before paying.
-                try:
-                    config.make_claude()
-                except Exception:  # no anthropic package, no API key...
-                    return self._send(503, pages.pay_page(session, plan, chosen, mock, config.payments.mode,
-                                                          error=AI_MISSING))
+            if not self._ai_set_up(addons):
+                return self._send(503, pages.pay_page(session, plan, chosen, mock, config.payments.mode,
+                                                      addons=addons, error=AI_MISSING))
             session.attestation = confirm("ticked the confirmation box on the Retrack page")
+            error = self._checkout(session, chosen, addons, cancel_path="results?checkout=canceled")
+            if error:
+                self._send(502, pages.pay_page(session, plan, chosen, mock, config.payments.mode,
+                                               addons=addons, error=error))
 
+        def _checkout(self, session, songs, addons, cancel_path):
+            """Pay for these songs and add-ons: one order, one Checkout Session.
+
+            Demo mode unlocks straight away. Otherwise: reuse the open checkout for the same
+            order (never a second charge), close it if the order changed, or create one with
+            a line for the songs and a line per add-on. Redirects, and returns None; if Stripe
+            fails, returns the (title, message) to show instead.
+            """
             if config.payments.mode == DEMO:
-                mark_paid(session, chosen)
+                mark_paid(session, songs, addons)
                 return self._redirect(f"/s/{session.id}/fixes")
-
-            amount = round(total_price(plan.songs) * 100)  # in cents, for checking Stripe's total
+            songs_list = [session.results[i] for i in songs]
+            amount = round(order_total(songs_list, addons) * 100)  # in cents, for checking Stripe's total
             order = session.order
             try:
                 if order is not None:
                     checkout = config.payments.retrieve(order["checkout_id"])
                     if order_is_paid(session, checkout):  # already paid in another tab
-                        mark_paid(session, order["songs"])
+                        unlock_order(session)
                         return self._redirect(f"/s/{session.id}/fixes")
-                    if order["songs"] == chosen and checkout.status == "open":
+                    same = order["songs"] == songs and order.get("addons", []) == addons
+                    if same and checkout.status == "open":
                         return self._redirect(checkout.url)  # the same order: reuse it, never a second charge
                     if checkout.status == "open":
                         config.payments.expire(checkout.id)  # a different order replaces it: close the old one
                 session.orders_placed += 1
                 base = self._base_url()
                 checkout = config.payments.create_checkout(
-                    reference=session.id, quantity=len(chosen), unit_amount_cents=round(FIX_PRICE_USD * 100),
+                    reference=session.id, quantity=len(songs), unit_amount_cents=round(FIX_PRICE_USD * 100),
+                    addons=[(a, round(ADDON_PRICE_USD * 100)) for a in addons],
                     success_url=f"{base}/s/{session.id}/paid?checkout_session_id={{CHECKOUT_SESSION_ID}}",
-                    cancel_url=f"{base}/s/{session.id}/results?checkout=canceled",
+                    cancel_url=f"{base}/s/{session.id}/{cancel_path}",
                     idempotency_key=f"retrack-{session.id}-order-{session.orders_placed}")
             except PaymentError as e:
                 if e.retry:  # a network blip or an outage: trying again can work
-                    error = ("Stripe didn’t answer",
-                             f"Nothing was charged. Wait a minute and press the button again. ({e})")
-                else:  # Stripe said no to the request itself: retrying gets the same answer
-                    error = ("Stripe rejected the payment setup", "Stripe rejected the payment setup. "
-                             "Nothing was charged. The details are in the terminal where Retrack is running.")
-                return self._send(502, pages.pay_page(session, plan, chosen, mock, config.payments.mode, error=error))
-            session.order = {"songs": chosen, "checkout_id": checkout.id, "url": checkout.url, "amount": amount}
+                    return ("Stripe didn’t answer",
+                            f"Nothing was charged. Wait a minute and press the button again. ({e})")
+                # Stripe said no to the request itself: retrying gets the same answer
+                return ("Stripe rejected the payment setup", "Stripe rejected the payment setup. "
+                        "Nothing was charged. The details are in the terminal where Retrack is running.")
+            session.order = {"songs": songs, "addons": addons, "checkout_id": checkout.id, "url": checkout.url,
+                             "amount": amount}
             self._redirect(checkout.url)
+            return None
 
         def get_paid(self, session):
             """Stripe sends the customer back here. The URL proves nothing: ask Stripe."""
@@ -705,7 +790,7 @@ def make_handler(config):
                     "Stripe didn’t answer", "If you paid, your payment is safe. Reload this page in a minute.",
                     mock, step="fix"))
             if order_is_paid(session, checkout):
-                mark_paid(session, order["songs"])
+                unlock_order(session)
                 return self._redirect(f"/s/{session.id}/fixes")
             if checkout.client_reference_id != session.id or checkout.id != order["checkout_id"]:
                 return self._send(400, pages.error_page(
@@ -749,7 +834,7 @@ def make_handler(config):
                            f"({config.deleted_session_events} so far).")
                 return self._json(200, {"received": True})
             if order_is_paid(session, checkout):
-                mark_paid(session, session.order["songs"])
+                unlock_order(session)
                 return self._json(200, {"received": True, "unlocked": True})
             # Already unlocked (a repeat), or it doesn't match the order we stored: unlock nothing.
             # 200 either way, so Stripe doesn't retry something that will never match.
@@ -778,7 +863,7 @@ def make_handler(config):
             if self._need_paid(session):
                 return
             path = session.folder / fixes_workbook_name()
-            write_fixes_workbook(self._paid_plan(session), session.attestation, path)
+            write_fixes_workbook(self._paid_plan(session), session.attestation, path, paid_addons(session))
             self._send(200, path.read_bytes(), XLSX_TYPE,
                        [("Content-Disposition", f'attachment; filename="{path.name}"')])
 

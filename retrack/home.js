@@ -32,22 +32,6 @@
     });
   }
 
-  // ---- Pay step: show the privacy text that matches the two extra checks ----
-  // (CSS does this too where the browser supports :has; this covers the rest.)
-  var smart = document.getElementById("smart_names");
-  var ai = document.getElementById("ai_search");
-  if (smart && ai) {
-    var showPrivacy = function () {
-      var key = (smart.checked ? "1" : "0") + (ai.checked ? "1" : "0");
-      document.querySelectorAll("[data-privacy]").forEach(function (list) {
-        list.hidden = list.getAttribute("data-privacy") !== key;
-      });
-    };
-    smart.addEventListener("change", showPrivacy);
-    ai.addEventListener("change", showPrivacy);
-    showPrivacy();
-  }
-
   // ---- Progress page: ask the server how far the check is, every second ----
   var progressTitle = document.querySelector("[data-status-url]");
   if (progressTitle) {
@@ -148,16 +132,55 @@
     });
   }
 
-  // ---- Fix pack: "N songs × $X" as songs are ticked ----
-  // The server sends every possible line (0 songs, 1 song, ...); we pick one.
+  // ---- Fix pack: select all, the add-ons, the price line and the privacy text ----
+  // The server sends every possible price line (by number of songs and add-ons), each
+  // song's add-ons (data-addons) and every privacy text; the script only picks.
   var fixForm = document.getElementById("fix-form");
   if (fixForm) {
     var lines = JSON.parse(fixForm.getAttribute("data-lines"));
     var total = document.getElementById("fix-total");
-    var update = function () {
-      var n = fixForm.querySelectorAll('input[name="song"]:checked').length;
-      total.textContent = lines[n] + ".";
+    var songs = Array.prototype.slice.call(fixForm.querySelectorAll('input[name="song"]'));
+    var addons = Array.prototype.slice.call(fixForm.querySelectorAll("input[data-addon]"));
+    var all = document.getElementById("select-all");
+    var allButton = fixForm.querySelector("[data-select-all-button]");
+    if (allButton) allButton.remove(); // the no-JS fallback; the checkbox takes over
+    if (all) all.closest("label").hidden = false;
+
+    var addon = function (name) {
+      for (var i = 0; i < addons.length; i++) if (addons[i].getAttribute("data-addon") === name) return addons[i];
+      return null;
     };
+    var charged = function (name) { // ticked, and not already paid for this visit
+      var box = addon(name);
+      return box && box.checked && !box.hasAttribute("data-paid") ? "1" : "0";
+    };
+    var update = function () {
+      var ticked = songs.filter(function (s) { return s.checked; });
+      if (all) { // all ticked: checked; some: mixed; none: empty
+        all.checked = ticked.length === songs.length && songs.length > 0;
+        all.indeterminate = ticked.length > 0 && ticked.length < songs.length;
+      }
+      addons.forEach(function (box) {
+        if (box.hasAttribute("data-paid")) return; // already paid: stays on, never charged again
+        var name = box.getAttribute("data-addon");
+        var needed = ticked.some(function (s) { return (" " + s.getAttribute("data-addons") + " ").indexOf(" " + name + " ") >= 0; });
+        box.disabled = !needed;
+        if (!needed) box.checked = false;
+        document.getElementById(name + "-why").hidden = needed;
+      });
+      total.textContent = lines[ticked.length + "|" + charged("ai_search") + charged("smart_names")];
+      var on = function (name) { var box = addon(name); return box && box.checked ? "1" : "0"; };
+      var key = on("smart_names") + on("ai_search");
+      fixForm.querySelectorAll("[data-privacy]").forEach(function (list) {
+        list.hidden = list.getAttribute("data-privacy") !== key;
+      });
+    };
+    if (all) {
+      all.addEventListener("change", function () { // songs only, never the add-ons
+        songs.forEach(function (s) { s.checked = all.checked; });
+        update();
+      });
+    }
     fixForm.addEventListener("change", update);
     update();
   }

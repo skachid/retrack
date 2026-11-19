@@ -20,9 +20,9 @@ from pathlib import Path
 
 from .checker import GREEN, RED
 from .compliance import ATTESTATION_TEXT, COMPLIANCE_TEXT, NEVER_TEXT
-from .fixes import (ALL_SET, CLAIM, FIX_PRICE_USD, LINK, REGISTER, UNRESOLVED, bulk_match_name, fix_kind,
-                    sold_kind,
-                    price_line)
+from .fixes import (ADDON_LABELS, ADDON_PRICE_USD, ADDONS, AI_SEARCH, ALL_SET, CLAIM, FIX_PRICE_USD, LINK,
+                    REGISTER, SMART_NAMES, UNRESOLVED, addon_applies, addons_offered, bulk_match_name, fix_kind,
+                    price_line, sold_kind)
 from .payments import DEMO, DEMO_BANNER, TEST, TEST_BANNER
 from .importer import FIELDS, LOW_CONFIDENCE, REQUIRED, SAMPLE_ROWS, column_letter
 from .privacy import privacy_items
@@ -47,9 +47,19 @@ SMART_NAMES_TEXT = ("After checkout, for the songs you pay for: when a writer’
 AI_SEARCH_TEXT = ("After checkout, for the red songs you pay for: Retrack sends the song title and writer "
                   "names to The MLC’s song search and to an AI service, to tell whether each needs "
                   "registering or linking.")
+ADDON_TEXT = {AI_SEARCH: AI_SEARCH_TEXT, SMART_NAMES: SMART_NAMES_TEXT}
+# Why an add-on is greyed out: none of the ticked songs needs it.
+ADDON_NOT_NEEDED_TEXT = {AI_SEARCH: "Only needed for red songs.",
+                         SMART_NAMES: "Only needed when a writer is missing at The MLC."}
+ADDON_PAID_TEXT = "Already paid for this visit."
 # The same check offered on the fix page, for songs already paid for.
 AI_SEARCH_NOW_TEXT = ("Sends these songs’ titles and writer names to The MLC’s song search and to an AI "
                       "service, to tell whether each needs registering or linking.")
+
+
+def money(dollars):
+    """$2 for whole dollars, $2.50 otherwise: for the short "+$2" on an add-on."""
+    return f"${dollars:,.0f}" if dollars == int(dollars) else f"${dollars:,.2f}"
 MOCK_TOGGLE_TEXT = " In sample data mode an offline stand-in answers instead, so nothing is sent."
 
 
@@ -293,7 +303,7 @@ def columns_page(session, mock=False, error=None):
     return layout("Check the columns, Retrack", body, mock, step="columns")
 
 
-# ---- The extra checks (chosen on the pay step), and the check running ------------------------
+# ---- The add-ons (chosen on the results page), and the check running -----------------------
 
 def _switch(field_id, name, label, sentence, checked, mock, required=False):
     note = MOCK_TOGGLE_TEXT if mock else ""
@@ -305,21 +315,38 @@ def _switch(field_id, name, label, sentence, checked, mock, required=False):
 CHECK_LINE = "The free check looks up each song at The MLC. No AI is used."
 
 
-def extra_checks(session, mock):
-    """The two optional AI checks, chosen on the pay step and run only after checkout,
-    with the "what will leave this computer" text for every setting (from data_flows()).
-    Only the list for the current settings shows without CSS or JS."""
-    s = session.settings
+def _addon_switch(addon, offered, checked, paid, mock):
+    """One paid add-on: "AI search, +$2", its one-sentence disclosure, and, when it's
+    greyed out, why. data-addon lets the script grey it out as songs are ticked."""
+    note = MOCK_TOGGLE_TEXT if mock else ""
+    disabled = paid or not offered
+    why = ADDON_PAID_TEXT if paid else ADDON_NOT_NEEDED_TEXT[addon]
+    return (f'<label class="switch addon"><input type="checkbox" id="{addon}" name="{addon}" value="on" '
+            f'data-addon="{addon}"{" data-paid" if paid else ""}'
+            f'{" checked" if checked or paid else ""}{" disabled" if disabled else ""} '
+            f'aria-describedby="{addon}-why">'
+            f"<span><strong>{ADDON_LABELS[addon]}, +{money(ADDON_PRICE_USD)}</strong> {escape(ADDON_TEXT[addon] + note)}"
+            f'<span id="{addon}-why" class="addon-why"{"" if disabled else " hidden"}>{escape(why)}</span>'
+            "</span></label>")
+
+
+def _addons_html(session, offered, chosen, mock):
+    """The two add-ons, then what will leave this computer for every on/off setting (from
+    data_flows()). Only the list for the current setting shows without CSS or JS."""
+    on = {a: a in chosen or session.settings.get(a, False) for a in ADDONS}
     variants = "".join(
         privacy_list(sn, ai, mock, f' data-privacy="{int(sn)}{int(ai)}"'
-                     + ("" if (sn, ai) == (s["smart_names"], s["ai_search"]) else " hidden"))
+                     + ("" if (sn, ai) == (on[SMART_NAMES], on[AI_SEARCH]) else " hidden"))
         for sn in (False, True) for ai in (False, True))
-    return f"""<fieldset class="settings"><legend class="h2">Extra checks after checkout (optional)</legend>
-          {_switch("smart_names", "smart_names", "Smart names", SMART_NAMES_TEXT, s["smart_names"], mock)}
-          {_switch("ai_search", "ai_search", "AI search", AI_SEARCH_TEXT, s["ai_search"], mock)}
+    switches = "".join(_addon_switch(a, a in offered, a in chosen, session.settings.get(a, False), mock)
+                       for a in ADDONS)
+    return f"""<fieldset class="settings addons"><legend class="h2">Extra checks (optional)</legend>
+          <p class="helper">{money(ADDON_PRICE_USD)} each per order, not per song. They run only after checkout,
+          on the songs you pay for.</p>
+          {switches}
         </fieldset>
-        <section class="privacy" aria-labelledby="leaves-title">
-          <h2 id="leaves-title">What will leave this computer</h2>
+        <section class="privacy privacy--addons" aria-labelledby="leaves-title">
+          <h3 id="leaves-title">What will leave this computer</h3>
           <div aria-live="polite">{variants}</div>
         </section>"""
 
@@ -396,14 +423,14 @@ def _needs_search(session, unresolved, mock, error=None):
     head = f"{n} {'song needs' if n == 1 else 'songs need'} AI search to be worked out"
     why = ("Retrack found no match for these ISRCs. AI search tells whether each song needs registering "
            "or is already registered under another title, since registering it twice creates a duplicate. "
-           "You’ve paid for these songs, so this costs nothing more.")
+           f"It’s a {money(ADDON_PRICE_USD)} add-on, once for this order, however many songs.")
     return f"""<div class="needs-search" role="region" aria-labelledby="needs-title">
         <h3 id="needs-title">{head}</h3>
         <p>{why}</p>
         {alert(*error) if error else ""}
         <form method="post" action="/s/{session.id}/recheck">
           {_switch("recheck-ai", "ai_search", "AI search", AI_SEARCH_NOW_TEXT, False, mock, required=True)}
-          <button class="btn btn--quiet btn--small" type="submit">Work out {"this song" if n == 1 else f"these {n} songs"}</button>
+          <button class="btn btn--quiet btn--small" type="submit">Add AI search for {money(ADDON_PRICE_USD)}</button>
         </form>
       </div>"""
 
@@ -417,27 +444,45 @@ def _paid_rows(session, rows):
             f'<p><a href="/s/{session.id}/fixes">See your fixes</a></p>')
 
 
-def _fix_section(session, error=None, mock=False):
+def _fix_section(session, error=None, mock=False, selected=None, addons=()):
     paid = set(session.paid_songs)
     fixable = [(i, r) for i, r in enumerate(session.results) if sold_kind(r) and i not in paid]
     paid_rows = [r for i, r in enumerate(session.results) if i in paid]
     if not fixable and not paid_rows:
         return ""
-    # Every possible total, worked out by the same price_line() the CLI uses, so the
-    # page's script only picks one; it never does the sum itself.
-    lines = [price_line([r for _, r in fixable[:n]]) for n in range(len(fixable) + 1)]
+    selected = set(selected or ())
+    ticked = [r for i, r in fixable if i in selected]
+    # Without JS the add-ons can't follow the ticks, so they're offered if any song on the
+    # list could use them (the server checks again on submit); the script narrows it live.
+    offered = addons_offered(ticked or [r for _, r in fixable])
+    chosen = [a for a in addons if a in offered and not session.settings.get(a)]
+    # Every possible line, by number of songs and add-ons, worked out by price_line(), so
+    # the page's script only picks one; it never does the sum itself. Already-paid add-ons
+    # are never charged again, so they're never in the line.
+    lines = {f"{n}|{int(ai)}{int(sn)}": price_line([r for _, r in fixable[:n]],
+                                                   [a for a, on in ((AI_SEARCH, ai), (SMART_NAMES, sn)) if on])
+             for n in range(len(fixable) + 1) for ai in (False, True) for sn in (False, True)}
     items = "".join(
-        f'<li><label class="fix-row"><input type="checkbox" name="song" value="{i}">'
+        f'<li><label class="fix-row"><input type="checkbox" name="song" value="{i}"'
+        f'{" checked" if i in selected else ""} data-addons="{" ".join(a for a in ADDONS if addon_applies(a, r))}">'
         f'<span class="fix-song"><span class="title">{escape(r.row.title)}</span>'
         f'<span class="artist">{escape(r.row.artist)}</span></span>'
         f'<span class="fix-kind">{escape(KIND_TEXT[sold_kind(r)])}</span></label></li>'
         for i, r in fixable)
+    every = len(selected & {i for i, _ in fixable}) == len(fixable)
     form = ""
     if fixable:
-        form = f"""<form id="fix-form" method="post" action="/s/{session.id}/fix" data-lines="{escape(json.dumps(lines))}">
+        form = f"""<form id="fix-form" class="checks-form" method="post" action="/s/{session.id}/fix" data-lines="{escape(json.dumps(lines))}">
         {alert(*error) if error else ""}
+        <div class="fix-all">
+          <label class="fix-all-box" hidden><input type="checkbox" id="select-all"{" checked" if every else ""}>
+            <span>Select all songs</span></label>
+          <button class="btn btn--quiet btn--small" type="submit" name="select_all" value="1" data-select-all-button>Select all songs</button>
+        </div>
         <ul class="fix-list">{items}</ul>
-        <p id="fix-total" class="fix-total" aria-live="polite">${FIX_PRICE_USD:,.2f} per song, the same for every verdict. You pay on the next step.</p>
+        {_addons_html(session, offered, chosen, mock)}
+        <p id="fix-total" class="fix-total" aria-live="polite">{escape(price_line(ticked, chosen))}</p>
+        <p class="helper">Songs are {money(FIX_PRICE_USD)} each, the same for every verdict. You pay on the next step.</p>
         <button class="btn" type="submit">Review my fix pack</button>
       </form>"""
     return f"""<section class="fix" aria-labelledby="fix-title">
@@ -463,7 +508,7 @@ def _paid_link(session):
             f'<a href="/s/{session.id}/fixes">See your fixes</a></p>')
 
 
-def results_page(session, mock=False, error=None, notice=""):
+def results_page(session, mock=False, error=None, notice="", selected=None, addons=()):
     results = session.results
     claude_note = ""
     if session.claude_failures:
@@ -498,7 +543,7 @@ def results_page(session, mock=False, error=None, notice=""):
       {claude_note}
       {_import_notes(session)}
       {list_html}
-      {_fix_section(session, error, mock)}
+      {_fix_section(session, error, mock, selected, addons)}
       {privacy_panel(session, mock)}
     </div>
   </section>"""
@@ -534,17 +579,27 @@ def payment_privacy(payment_mode):
     return ("Payments are handled by Stripe.", "Retrack never sees your card number.")
 
 
-def _pay_unresolved_note(session, plan):
+def _pay_unresolved_note(session, plan, addons):
     if not plan.unresolved:
         return ""
-    return ('<p class="helper">After checkout, Retrack works out the songs marked “Needs fixing” if you tick '
-            "AI search below; otherwise you get the steps to check them by hand. The price doesn’t change.</p>")
+    if AI_SEARCH in addons or session.settings["ai_search"]:
+        how = "Retrack works out the songs marked “Needs fixing” with AI search"
+    else:
+        how = ("you get the steps to check the songs marked “Needs fixing” by hand. You can still add AI "
+               f"search for {money(ADDON_PRICE_USD)} on the fix page")
+    return f'<p class="helper">After checkout, {how}. The song price doesn’t change.</p>'
 
 
-def pay_page(session, plan, chosen, mock=False, payment_mode=DEMO, error=None):
+
+def pay_page(session, plan, chosen, mock=False, payment_mode=DEMO, error=None, addons=()):
     rows = "".join(f'<li><span class="title">{escape(r.row.title)}</span> '
                    f'<span class="fix-kind">{escape(KIND_TEXT[sold_kind(r)])}</span></li>' for r in plan.songs)
+    rows += "".join(f'<li><span class="title">{escape(ADDON_LABELS[a])}</span> '
+                    f'<span class="fix-kind">Add-on, {money(ADDON_PRICE_USD)} once for this order</span></li>'
+                    for a in ADDONS if a in addons)
     hidden = "".join(f'<input type="hidden" name="song" value="{i}">' for i in chosen)
+    hidden += "".join(f'<input type="hidden" name="{a}" value="on">' for a in ADDONS if a in addons)
+    on = {a: a in addons or session.settings.get(a, False) for a in ADDONS}
     banner = {TEST: f'<p class="pay-banner" role="note"><strong>{escape(TEST_BANNER)}</strong></p>',
               DEMO: f'<p class="pay-banner" role="note"><strong>{escape(DEMO_BANNER)}</strong></p>'}.get(payment_mode, "")
     button = "Pay (demo)" if payment_mode == DEMO else "Pay and see your fixes"
@@ -553,14 +608,17 @@ def pay_page(session, plan, chosen, mock=False, payment_mode=DEMO, error=None):
   <section class="flow" aria-labelledby="pay-title">
     <div class="container narrow">
       <h1 id="pay-title">Your fix pack</h1>
-      <p class="lead price">{escape(price_line(plan.songs))}</p>
+      <p class="lead price">{escape(price_line(plan.songs, list(addons)))}</p>
       <ul class="review-list">{rows}</ul>
-      {_pay_unresolved_note(session, plan)}
+      {_pay_unresolved_note(session, plan, addons)}
       {banner}
-      <form class="checks-form" method="post" action="/s/{session.id}/pay">
+      <form method="post" action="/s/{session.id}/pay">
         {alert(*error) if error else ""}
         {hidden}
-        {extra_checks(session, mock)}
+        <section class="privacy" aria-labelledby="leaves-title">
+          <h2 id="leaves-title">What will leave this computer</h2>
+          {privacy_list(on[SMART_NAMES], on[AI_SEARCH], mock)}
+        </section>
         <label class="attest"><input type="checkbox" name="attest" value="yes" required>
           <span>{escape(ATTESTATION_TEXT)}</span></label>
         <p class="never">{escape(head)} {escape(sentence)} {escape(NEVER_TEXT)}</p>
@@ -642,8 +700,8 @@ KIND_LEADS = {
     ALL_SET: "A closer look found nothing to fix.",
 }
 # When AI search was off, nothing was attempted, so say that instead of "couldn't finish".
-LEAD_AI_SEARCH_OFF = ("AI search was off, so Retrack couldn’t tell whether these need registering or "
-                      "linking. Here’s how to check by hand, or turn on AI search to work them out.")
+LEAD_AI_SEARCH_OFF = ("AI search wasn’t added, so Retrack couldn’t tell whether these need registering or "
+                      "linking. Here’s how to check by hand, or add AI search to work them out.")
 # Short meanings for the count row at the top, like Red/Yellow/Green on the results page.
 KIND_MEANINGS = {REGISTER: "Not at The MLC yet", LINK: "Registered, not linked", CLAIM: "Registered, something missing",
                  UNRESOLVED: "Not placed yet", ALL_SET: "Nothing to fix"}
@@ -811,7 +869,7 @@ def fixes_page(session, plan, mock=False, template_note="", error=None, seconds_
       <div class="results-head">
         <div>
           <h1 id="fixes-title">Your fixes</h1>
-          <p class="results-meta">Paid: {escape(price_line(plan.songs))}</p>
+          <p class="results-meta">Paid: {escape(price_line(plan.songs, [a for a in ADDONS if session.settings.get(a)]))}</p>
         </div>
       </div>
       <p class="lead">Everything Retrack could fill in is below; the highlighted fields are yours to fill in.</p>

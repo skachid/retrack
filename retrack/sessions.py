@@ -38,6 +38,7 @@ class Session:
     table: object = None   # importer.Table
     mapping: dict = None   # importer column mapping (proposed, then confirmed)
     proposed: dict = None  # what the rules proposed, to keep their confidence
+    # The add-ons paid for this visit: they're what runs after checkout (web.mark_paid sets them)
     settings: dict = field(default_factory=lambda: {"smart_names": False, "ai_search": False})
     import_result: object = None  # importer.ImportResult
     rows: list = field(default_factory=list)     # CatalogRows, in catalog order
@@ -51,7 +52,7 @@ class Session:
     created_at: float = field(default_factory=time.monotonic)
     # Payment (see payments.py): what's been paid for, and the open order if any
     attestation: object = None   # fixes.Attestation, recorded when the user ticks the box
-    order: dict = None           # {"songs": [...], "checkout_id": "...", "url": "...", "n": order number}
+    order: dict = None           # {"songs": [...], "addons": [...], "checkout_id", "url", "amount" (cents)}
     paid_songs: list = field(default_factory=list)  # result indexes the user has paid for
     orders_placed: int = 0
     template_note: str = ""  # e.g. songs left out of a filled-in MLC template, and why

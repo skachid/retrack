@@ -223,11 +223,7 @@ def test_full_flow_upload_columns_scan_report_fix_pack_download(server):
     assert ATTESTATION_TEXT in page and COMPLIANCE_TEXT in page
     assert "Pay (demo)" in page  # --mock: no Stripe
 
-    # the pay step offers both extra checks, off by default, just above the attestation
-    assert "Extra checks after checkout (optional)" in page
-    assert '<input type="checkbox" id="smart_names" name="smart_names" value="on">' in page
-    assert '<input type="checkbox" id="ai_search" name="ai_search" value="on">' in page
-    assert page.index('id="ai_search"') < page.index('name="attest"')
+    assert 'id="ai_search"' not in page  # the add-ons are chosen on the results page, not here
 
     # 6. confirm and pay (demo) -> the on-screen fix pack
     status, headers, _ = call(server, f"/s/{sid}/pay", *form([("song", i) for i in ids]
@@ -289,14 +285,21 @@ def test_no_songs_ticked_explains(server):
 
 
 def test_price_on_the_page_comes_from_price_line(server):
-    sid = scanned(server, ai_search=True)
+    sid = scanned(server)
     _, page = text(server, f"/s/{sid}/results")
     import html, re
     lines = json.loads(html.unescape(re.search(r'data-lines="([^"]*)"', page).group(1)))
     results = server.sessions.get(sid).results
     from retrack.fixes import sold_kind
     fixable = [r for r in results if sold_kind(r)]  # red songs too: worked out after checkout
-    assert lines == [price_line(fixable[:n]) for n in range(len(fixable) + 1)]
+    expected = {}
+    for n in range(len(fixable) + 1):
+        for ai in (False, True):
+            for sn in (False, True):
+                addons = [a for a, on in (("ai_search", ai), ("smart_names", sn)) if on]
+                expected[f"{n}|{int(ai)}{int(sn)}"] = price_line(fixable[:n], addons)
+    assert lines == expected  # every song count with every add-on combination
+    assert lines["4|11"] == "4 songs × $5.00 = $20.00 · AI search $2.00 · Smart names $2.00 · Total $24.00"
 
 
 # ---- Progress ---------------------------------------------------------------------------------
@@ -431,11 +434,15 @@ def test_claude_not_set_up_is_explained_before_paying(tmp_path):
         sid = scanned(srv)  # the free check never needs the AI
         ids = fixable_ids(text(srv, f"/s/{sid}/results")[1])
         songs = [("song", i) for i in ids]
-        status, _, body = call(srv, f"/s/{sid}/pay", *form(songs + check_pairs(smart_names=True)
-                                                           + [("attest", "yes")]))
+        # Reported as soon as the add-on is chosen on the results page, with the ticks kept...
+        status, _, body = call(srv, f"/s/{sid}/fix", *form(songs + check_pairs(smart_names=True)))
         page = body.decode()
         assert status == 503 and "The AI checks aren’t set up on this computer" in page
-        assert '<input type="checkbox" id="smart_names" name="smart_names" value="on" checked>' in page  # kept
+        assert 'id="smart_names" name="smart_names" value="on" data-addon="smart_names" checked' in page
+        # ...and again on the pay step, before any payment.
+        status, _, body = call(srv, f"/s/{sid}/pay", *form(songs + check_pairs(smart_names=True)
+                                                           + [("attest", "yes")]))
+        assert status == 503 and "The AI checks aren’t set up on this computer" in body.decode()
         assert not srv.sessions.get(sid).paid_songs  # nothing unlocked
         status, headers, _ = call(srv, f"/s/{sid}/pay", *form(songs + [("attest", "yes")]))
         assert status == 303 and headers["Location"].endswith("/fixes")  # with both checks off it goes ahead
@@ -635,12 +642,17 @@ def test_sample_data_banner_on_every_page_in_mock_mode(server):
     assert BANNER not in pages.home_page(mock=False)
 
 
-def test_both_toggles_are_off_by_default_with_one_sentence_each(server):
+def test_both_add_ons_are_off_by_default_with_one_sentence_each(server):
     sid = scanned(server)
-    page = pay_step(server, sid)
+    _, page = text(server, f"/s/{sid}/results")
     import html
-    assert '<input type="checkbox" id="smart_names" name="smart_names" value="on">' in page  # not checked
-    assert '<input type="checkbox" id="ai_search" name="ai_search" value="on">' in page
+    form_html = page.split('id="fix-form"')[1].split("</form>")[0]
+    for addon in ("smart_names", "ai_search"):
+        box = form_html.split(f'id="{addon}"')[1].split(">")[0]
+        assert "checked" not in box  # off by default
+    # below the song list, above the price line
+    assert form_html.index('class="fix-list"') < form_html.index("Extra checks (optional)") < form_html.index('id="fix-total"')
+    assert "AI search, +$2" in form_html and "Smart names, +$2" in form_html
     shown = html.unescape(page)
     for sentence in (pages.SMART_NAMES_TEXT, pages.AI_SEARCH_TEXT):
         assert sentence in shown
@@ -747,9 +759,9 @@ def test_there_is_no_check_step_any_more(server):
     assert status == 303 and headers["Location"].endswith("/progress")
 
 
-def test_pay_step_shows_the_privacy_text_for_each_toggle_setting(server):
+def test_results_page_shows_the_privacy_text_for_each_add_on_setting(server):
     sid = scanned(server)
-    page = pay_step(server, sid)
+    _, page = text(server, f"/s/{sid}/results")
     import html, re
     for sn in (False, True):
         for ai in (False, True):
@@ -848,8 +860,8 @@ def test_songs_needing_ai_search_get_a_callout_with_the_checkbox(server):
     box = group.split('<div class="needs-search"')[1].split("</form>")[0]
     assert "2 songs need AI search to be worked out" in box
     assert 'name="ai_search" value="on" required' in box  # ticking it is the OK to send data
-    assert "an AI service" in box and "Work out these 2 songs" in box
-    assert "AI search was off" in group  # says why, not "couldn't finish"
+    assert "an AI service" in box and "Add AI search for $2" in box  # no longer free
+    assert "AI search wasn’t added" in group  # says why, not "couldn't finish"
 
 
 def test_recheck_without_the_box_ticked_sends_nothing(server):
@@ -886,12 +898,12 @@ def test_recheck_checks_only_the_red_songs_with_ai_search(tmp_path):
         open_fixes(srv, sid)  # AI search off: nothing runs, the red songs wait for the box
         assert len(checked) == 5
         status, headers, _ = call(srv, f"/s/{sid}/recheck", *form([("ai_search", "on")]))
-        assert status == 303 and headers["Location"].endswith("/progress")
-        assert wait_done(srv, sid)["state"] == "done"
+        # Pay (demo) for the AI search add-on, then the fix page works the red songs out
+        assert status == 303 and headers["Location"].endswith("/fixes")
+        _, page = open_fixes(srv, sid)
         assert sorted(checked[5:]) == ["QZABC2400004", "QZABC2400005"]  # just the two red songs
         s = srv.sessions.get(sid)
         assert s.settings["ai_search"] is True  # so "what left this computer" now says so
-        _, page = open_fixes(srv, sid)
         assert 'class="needs-search"' not in page  # both songs are placed now
         assert 'data-status="register"' in page and 'data-status="link"' in page
         assert "song titles and writer names" in page  # the privacy panel follows the new setting
