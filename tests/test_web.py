@@ -118,14 +118,22 @@ def columns(srv, sid, mapping=SAMPLE_MAPPING):
     return call(srv, f"/s/{sid}/columns", *form(mapping))
 
 
+def check_pairs(smart_names=False, ai_search=False):
+    """The pay step's two extra-check boxes, as form fields."""
+    return ([("smart_names", "on")] if smart_names else []) + ([("ai_search", "on")] if ai_search else [])
+
+
 def scan(srv, sid, mapping=SAMPLE_MAPPING, smart_names=False, ai_search=False):
-    """Confirm the columns, then start the check with these extra checks."""
+    """Confirm the columns, then start the free check. The extra checks are chosen on
+    the pay step, so they're remembered here and sent by pay_all()."""
     status, headers, body = columns(srv, sid, mapping)
     if status != 303:
         return status, headers, body
     assert headers["Location"].endswith("/check")
-    pairs = ([("smart_names", "on")] if smart_names else []) + ([("ai_search", "on")] if ai_search else [])
-    return call(srv, f"/s/{sid}/scan", *form(pairs))
+    if not hasattr(srv, "checks"):
+        srv.checks = {}
+    srv.checks[sid] = check_pairs(smart_names, ai_search)
+    return call(srv, f"/s/{sid}/scan", *form([]))
 
 
 def wait_done(srv, sid, timeout=10):
@@ -160,9 +168,19 @@ def open_fixes(srv, sid):
 def pay_all(srv, sid, ids=None):
     """Tick every song on offer (or just `ids`) and pay. Tests have no Stripe keys: Pay (demo)."""
     ids = ids if ids is not None else fixable_ids(text(srv, f"/s/{sid}/results")[1])
-    status, headers, _ = call(srv, f"/s/{sid}/pay", *form([("song", i) for i in ids] + [("attest", "yes")]))
+    extra = getattr(srv, "checks", {}).get(sid, [])
+    status, headers, _ = call(srv, f"/s/{sid}/pay", *form([("song", i) for i in ids] + extra + [("attest", "yes")]))
     assert status == 303 and headers["Location"].endswith("/fixes")
     return ids
+
+
+def pay_step(srv, sid):
+    """Tick every song on offer and open the pay step. Returns its HTML."""
+    ids = fixable_ids(text(srv, f"/s/{sid}/results")[1])
+    status, page = text(srv, f"/s/{sid}/fix", data=form([("song", i) for i in ids])[0],
+                        content_type="application/x-www-form-urlencoded")
+    assert status == 200
+    return page
 
 
 def fixable_ids(page):
@@ -182,19 +200,19 @@ def test_full_flow_upload_columns_scan_report_fix_pack_download(server):
     assert '<option value="1" selected>B: Song Name</option>' in page
     assert '<option value="3" selected>D: ISRC code</option>' in page
     assert '<option value="4" selected>E: Composer(s)</option>' in page  # writers: a dropdown too
-    assert 'id="smart_names"' not in page  # the extra checks live on the Check step
+    assert 'id="smart_names"' not in page  # the extra checks live on the pay step
 
-    # 2b. the Check step: both extra checks off by default
+    # 2b. the Check step: just the free check, no extra checks to choose
     status, headers, _ = columns(server, sid, [("map_title", "1"), ("map_artist", "2"), ("map_isrc", "3"),
                                                ("map_writers", "4")])
     assert status == 303 and headers["Location"].endswith("/check")
     _, page = text(server, f"/s/{sid}/check")
-    assert '<input type="checkbox" id="smart_names" name="smart_names" value="on">' in page
-    assert '<input type="checkbox" id="ai_search" name="ai_search" value="on">' in page
+    assert "The free check looks up each song at The MLC. No AI is used." in page
+    assert 'id="smart_names"' not in page and 'id="ai_search"' not in page
 
-    # 3. scan with AI search on
+    # 3. the free check
     status, headers, _ = scan(server, sid, [("map_title", "1"), ("map_artist", "2"), ("map_isrc", "3"),
-                                            ("map_writers", "4")], ai_search=True)
+                                            ("map_writers", "4")])
     assert status == 303
     assert wait_done(server, sid)["state"] == "done"
 
@@ -215,8 +233,15 @@ def test_full_flow_upload_columns_scan_report_fix_pack_download(server):
     assert ATTESTATION_TEXT in page and COMPLIANCE_TEXT in page
     assert "Pay (demo)" in page  # --mock: no Stripe
 
+    # the pay step offers both extra checks, off by default, just above the attestation
+    assert "Extra checks after checkout (optional)" in page
+    assert '<input type="checkbox" id="smart_names" name="smart_names" value="on">' in page
+    assert '<input type="checkbox" id="ai_search" name="ai_search" value="on">' in page
+    assert page.index('id="ai_search"') < page.index('name="attest"')
+
     # 6. confirm and pay (demo) -> the on-screen fix pack
-    status, headers, _ = call(server, f"/s/{sid}/pay", *form([("song", i) for i in ids] + [("attest", "yes")]))
+    status, headers, _ = call(server, f"/s/{sid}/pay", *form([("song", i) for i in ids]
+                                                             + check_pairs(ai_search=True) + [("attest", "yes")]))
     assert status == 303 and headers["Location"].endswith("/fixes")
     status, page = open_fixes(server, sid)
     assert status == 200
@@ -402,17 +427,24 @@ def test_mlc_problems_are_explained(tmp_path, client, expected):
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
 
-def test_claude_not_set_up_is_explained_before_scanning(tmp_path):
+def test_claude_not_set_up_is_explained_before_paying(tmp_path):
     def no_claude():
         raise RuntimeError("no ANTHROPIC_API_KEY")
 
-    # The AI runs only after checkout, but a missing key is reported now, not after paying.
+    # The AI runs only after checkout, but a missing key is reported on the pay step, not after paying.
     srv = start(tmp_path, mock=False, make_claude=no_claude)
     try:
-        sid = upload_ok(srv)
-        status, _, body = scan(srv, sid, smart_names=True)
-        assert status == 503 and "The AI checks aren’t set up on this computer" in body.decode()
-        assert scan(srv, sid)[0] == 303  # with both checks off it goes ahead
+        sid = scanned(srv)  # the free check never needs the AI
+        ids = fixable_ids(text(srv, f"/s/{sid}/results")[1])
+        songs = [("song", i) for i in ids]
+        status, _, body = call(srv, f"/s/{sid}/pay", *form(songs + check_pairs(smart_names=True)
+                                                           + [("attest", "yes")]))
+        page = body.decode()
+        assert status == 503 and "The AI checks aren’t set up on this computer" in page
+        assert '<input type="checkbox" id="smart_names" name="smart_names" value="on" checked>' in page  # kept
+        assert not srv.sessions.get(sid).paid_songs  # nothing unlocked
+        status, headers, _ = call(srv, f"/s/{sid}/pay", *form(songs + [("attest", "yes")]))
+        assert status == 303 and headers["Location"].endswith("/fixes")  # with both checks off it goes ahead
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
@@ -611,9 +643,8 @@ def test_sample_data_banner_on_every_page_in_mock_mode(server):
 
 
 def test_both_toggles_are_off_by_default_with_one_sentence_each(server):
-    sid = upload_ok(server)
-    columns(server, sid)
-    _, page = text(server, f"/s/{sid}/check")
+    sid = scanned(server)
+    page = pay_step(server, sid)
     import html
     assert '<input type="checkbox" id="smart_names" name="smart_names" value="on">' in page  # not checked
     assert '<input type="checkbox" id="ai_search" name="ai_search" value="on">' in page
@@ -687,15 +718,15 @@ def test_privacy_text_matches_what_a_scan_actually_sends(tmp_path, smart_names, 
         assert claude.sent == declared.claude == frozenset()
         # After checkout (every song paid for): exactly what's declared for the paid songs too.
         pay_all(srv, sid)
-        open_fixes(srv, sid)
+        _, fixes = open_fixes(srv, sid)
         assert mlc.sent == declared.mlc_all
         assert claude.sent == declared.claude_all
     finally:
         srv.shutdown(); srv.server_close(); srv.sessions.delete_all()
 
-    # ...and the words on the page say exactly that
+    # ...and the words on the fix page (after checkout, with these checks chosen) say exactly that
     import html
-    shown = html.unescape(results)
+    shown = html.unescape(fixes)
     for heading, sentence in privacy_items(smart_names, ai_search):
         assert heading in shown and sentence in shown
     claude_line = next(h for h, _ in privacy_items(smart_names, ai_search) if "AI service" in h)
@@ -705,10 +736,17 @@ def test_privacy_text_matches_what_a_scan_actually_sends(tmp_path, smart_names, 
         assert "after checkout" in claude_line
 
 
-def test_check_page_shows_the_privacy_text_for_each_toggle_setting(server):
+def test_check_page_says_no_ai_and_offers_no_extra_checks(server):
     sid = upload_ok(server)
     columns(server, sid)
     _, page = text(server, f"/s/{sid}/check")
+    assert "The free check looks up each song at The MLC. No AI is used." in page
+    assert '<input type="checkbox"' not in page and "Start the check" in page
+
+
+def test_pay_step_shows_the_privacy_text_for_each_toggle_setting(server):
+    sid = scanned(server)
+    page = pay_step(server, sid)
     import html, re
     for sn in (False, True):
         for ai in (False, True):

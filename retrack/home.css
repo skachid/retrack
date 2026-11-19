@@ -129,14 +129,14 @@ input[type="checkbox"] { width: 20px; height: 20px; margin: 0; accent-color: var
 .switch strong { display: block; }
 
 /* Which privacy list shows follows the two toggles, even with scripting off */
-.scan-form:has(#smart_names:not(:checked)):has(#ai_search:not(:checked)) [data-privacy]:not([data-privacy="00"]),
-.scan-form:has(#smart_names:not(:checked)):has(#ai_search:checked) [data-privacy]:not([data-privacy="01"]),
-.scan-form:has(#smart_names:checked):has(#ai_search:not(:checked)) [data-privacy]:not([data-privacy="10"]),
-.scan-form:has(#smart_names:checked):has(#ai_search:checked) [data-privacy]:not([data-privacy="11"]) { display: none; }
-.scan-form:has(#smart_names:not(:checked)):has(#ai_search:not(:checked)) [data-privacy="00"],
-.scan-form:has(#smart_names:not(:checked)):has(#ai_search:checked) [data-privacy="01"],
-.scan-form:has(#smart_names:checked):has(#ai_search:not(:checked)) [data-privacy="10"],
-.scan-form:has(#smart_names:checked):has(#ai_search:checked) [data-privacy="11"] { display: grid; }
+.checks-form:has(#smart_names:not(:checked)):has(#ai_search:not(:checked)) [data-privacy]:not([data-privacy="00"]),
+.checks-form:has(#smart_names:not(:checked)):has(#ai_search:checked) [data-privacy]:not([data-privacy="01"]),
+.checks-form:has(#smart_names:checked):has(#ai_search:not(:checked)) [data-privacy]:not([data-privacy="10"]),
+.checks-form:has(#smart_names:checked):has(#ai_search:checked) [data-privacy]:not([data-privacy="11"]) { display: none; }
+.checks-form:has(#smart_names:not(:checked)):has(#ai_search:not(:checked)) [data-privacy="00"],
+.checks-form:has(#smart_names:not(:checked)):has(#ai_search:checked) [data-privacy="01"],
+.checks-form:has(#smart_names:checked):has(#ai_search:not(:checked)) [data-privacy="10"],
+.checks-form:has(#smart_names:checked):has(#ai_search:checked) [data-privacy="11"] { display: grid; }
 
 /* Privacy: what leaves this computer */
 .privacy { margin-top: var(--space-2xl); padding-top: var(--space-lg); border-top: 3px double var(--color-rule-2); }

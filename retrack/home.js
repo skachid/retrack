@@ -32,7 +32,7 @@
     });
   }
 
-  // ---- Columns page: show the privacy text that matches the two toggles ----
+  // ---- Pay step: show the privacy text that matches the two extra checks ----
   // (CSS does this too where the browser supports :has; this covers the rest.)
   var smart = document.getElementById("smart_names");
   var ai = document.getElementById("ai_search");

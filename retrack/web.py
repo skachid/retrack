@@ -517,14 +517,7 @@ def make_handler(config):
                 return self._redirect(f"/s/{session.id}/progress")
             if session.state == "columns":
                 return self._redirect(f"/s/{session.id}/columns")
-            form = self._form()
-            session.settings = {"smart_names": "smart_names" in form, "ai_search": "ai_search" in form}
-            if (session.settings["smart_names"] or session.settings["ai_search"]) and not mock:
-                # The AI only runs after checkout, but say now if it isn't set up, not after paying.
-                try:
-                    config.make_claude()
-                except Exception:  # no anthropic package, no API key...
-                    return self._send(503, pages.check_page(session, mock, error=AI_MISSING))
+            # The extra checks are chosen on the pay step; the free check never calls the AI.
             session.results = [None] * len(session.rows)
             # The free check never calls the AI: no name matcher, no work searcher.
             self._start(session, list(range(len(session.rows))))
@@ -635,6 +628,8 @@ def make_handler(config):
             if not chosen:
                 return self._redirect(f"/s/{session.id}/{'fixes' if session.paid_songs else 'results'}")
             plan = plan_fixes([session.results[i] for i in chosen], sell_red=True)
+            # The extra checks are chosen here and run only after checkout, on these songs.
+            session.settings = {"smart_names": "smart_names" in form, "ai_search": "ai_search" in form}
 
             # No attestation, no fix pack: checked here, on the server, not just by the
             # checkbox's "required" attribute (which a browser or script can skip).
@@ -643,6 +638,13 @@ def make_handler(config):
                     "No confirmation, no fix pack",
                     "Tick the box to confirm you reviewed the data and control the shares, then press "
                     "the button again. Nothing was charged.")))
+            if (session.settings["smart_names"] or session.settings["ai_search"]) and not mock:
+                # The AI only runs after checkout, but say now if it isn't set up, before paying.
+                try:
+                    config.make_claude()
+                except Exception:  # no anthropic package, no API key...
+                    return self._send(503, pages.pay_page(session, plan, chosen, mock, config.payments.mode,
+                                                          error=AI_MISSING))
             session.attestation = confirm("ticked the confirmation box on the Retrack page")
 
             if config.payments.mode == DEMO:

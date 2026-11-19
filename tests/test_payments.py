@@ -199,7 +199,9 @@ def ready_to_pay(srv):
 
 
 def pay(srv, sid, ids, attest=True):
-    return call(srv, f"/s/{sid}/pay", *form([("song", i) for i in ids] + ([("attest", "yes")] if attest else [])))
+    extra = getattr(srv, "checks", {}).get(sid, [])  # the extra checks chosen with scan()
+    return call(srv, f"/s/{sid}/pay", *form([("song", i) for i in ids] + extra
+                                           + ([("attest", "yes")] if attest else [])))
 
 
 def test_pay_redirects_to_stripe_checkout(stripe_server):

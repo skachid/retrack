@@ -302,36 +302,43 @@ def _switch(field_id, name, label, sentence, checked, mock, required=False):
             f"<span><strong>{label}</strong> {escape(sentence + note)}</span></label>")
 
 
+CHECK_LINE = "The free check looks up each song at The MLC. No AI is used."
+
+
 def check_page(session, mock=False, error=None):
-    s = session.settings
-    variants = "".join(
-        privacy_list(sn, ai, mock, f' data-privacy="{int(sn)}{int(ai)}"'
-                     + ("" if (sn, ai) == (s["smart_names"], s["ai_search"]) else " hidden"))
-        for sn in (False, True) for ai in (False, True))
-    n = len(session.rows)
     body = f"""
   <section class="flow" aria-labelledby="check-title">
     <div class="container">
       <h1 id="check-title">Check your songs</h1>
-      <p class="lead">{n} {"song is" if n == 1 else "songs are"} ready to check with The MLC. The check is free
-      and never uses an AI service; the extra checks run only after checkout, on the songs you pay for.</p>
+      <p class="lead">{escape(CHECK_LINE)}</p>
       {_import_notes(session)}
       {alert(*error) if error else ""}
       <form id="scan-form" class="scan-form" method="post" action="/s/{session.id}/scan">
-        <fieldset class="settings"><legend class="h2">Extra checks (optional)</legend>
-          {_switch("smart_names", "smart_names", "Smart names", SMART_NAMES_TEXT, s["smart_names"], mock)}
-          {_switch("ai_search", "ai_search", "AI search", AI_SEARCH_TEXT, s["ai_search"], mock)}
-        </fieldset>
-        <section class="privacy" aria-labelledby="leaves-title">
-          <h2 id="leaves-title">What will leave this computer</h2>
-          <div aria-live="polite">{variants}</div>
-        </section>
         <div class="actions"><button class="btn" type="submit">Start the check</button>
           <a href="/s/{session.id}/columns">Back to the columns</a></div>
       </form>
     </div>
   </section>"""
     return layout("Check your songs, Retrack", body, mock, step="check")
+
+
+def extra_checks(session, mock):
+    """The two optional AI checks, chosen on the pay step and run only after checkout,
+    with the "what will leave this computer" text for every setting (from data_flows()).
+    Only the list for the current settings shows without CSS or JS."""
+    s = session.settings
+    variants = "".join(
+        privacy_list(sn, ai, mock, f' data-privacy="{int(sn)}{int(ai)}"'
+                     + ("" if (sn, ai) == (s["smart_names"], s["ai_search"]) else " hidden"))
+        for sn in (False, True) for ai in (False, True))
+    return f"""<fieldset class="settings"><legend class="h2">Extra checks after checkout (optional)</legend>
+          {_switch("smart_names", "smart_names", "Smart names", SMART_NAMES_TEXT, s["smart_names"], mock)}
+          {_switch("ai_search", "ai_search", "AI search", AI_SEARCH_TEXT, s["ai_search"], mock)}
+        </fieldset>
+        <section class="privacy" aria-labelledby="leaves-title">
+          <h2 id="leaves-title">What will leave this computer</h2>
+          <div aria-live="polite">{variants}</div>
+        </section>"""
 
 
 def progress_text(session):
@@ -547,10 +554,8 @@ def payment_privacy(payment_mode):
 def _pay_unresolved_note(session, plan):
     if not plan.unresolved:
         return ""
-    how = ("with AI search, which you turned on" if session.settings["ai_search"] else
-           "if you turn on AI search then; otherwise you get the steps to check them by hand")
-    return (f'<p class="helper">After checkout, Retrack works out the songs marked “Needs fixing” {how}. '
-            "The price doesn’t change.</p>")
+    return ('<p class="helper">After checkout, Retrack works out the songs marked “Needs fixing” if you tick '
+            "AI search below; otherwise you get the steps to check them by hand. The price doesn’t change.</p>")
 
 
 def pay_page(session, plan, chosen, mock=False, payment_mode=DEMO, error=None):
@@ -569,9 +574,10 @@ def pay_page(session, plan, chosen, mock=False, payment_mode=DEMO, error=None):
       <ul class="review-list">{rows}</ul>
       {_pay_unresolved_note(session, plan)}
       {banner}
-      <form method="post" action="/s/{session.id}/pay">
+      <form class="checks-form" method="post" action="/s/{session.id}/pay">
         {alert(*error) if error else ""}
         {hidden}
+        {extra_checks(session, mock)}
         <label class="attest"><input type="checkbox" name="attest" value="yes" required>
           <span>{escape(ATTESTATION_TEXT)}</span></label>
         <p class="never">{escape(head)} {escape(sentence)} {escape(NEVER_TEXT)}</p>
